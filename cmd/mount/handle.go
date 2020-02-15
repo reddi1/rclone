@@ -1,15 +1,16 @@
-// +build linux darwin freebsd
+// +build linux,go1.11 darwin,go1.11 freebsd,go1.11
 
 package mount
 
 import (
+	"context"
 	"io"
+	"os"
 
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
-	"github.com/ncw/rclone/fs/log"
-	"github.com/ncw/rclone/vfs"
-	"golang.org/x/net/context" // switch to "context" when we stop supporting go1.8
+	"github.com/rclone/rclone/fs/log"
+	"github.com/rclone/rclone/vfs"
 )
 
 // FileHandle is an open for read file handle on a File
@@ -41,11 +42,16 @@ var _ fusefs.HandleWriter = (*FileHandle)(nil)
 // Write data to the file handle
 func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) (err error) {
 	defer log.Trace(fh, "len=%d, offset=%d", len(req.Data), req.Offset)("written=%d, err=%v", &resp.Size, &err)
-	n, err := fh.Handle.WriteAt(req.Data, req.Offset)
+	var n int
+	if fh.Handle.Node().VFS().Opt.CacheMode < vfs.CacheModeWrites || fh.Handle.Node().Mode()&os.ModeAppend == 0 {
+		n, err = fh.Handle.WriteAt(req.Data, req.Offset)
+	} else {
+		n, err = fh.Handle.Write(req.Data)
+	}
 	if err != nil {
 		return translateError(err)
 	}
-	resp.Size = int(n)
+	resp.Size = n
 	return nil
 }
 

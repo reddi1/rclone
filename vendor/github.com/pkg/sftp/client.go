@@ -122,6 +122,7 @@ func NewClientPipe(rd io.Reader, wr io.WriteCloser, opts ...ClientOption) (*Clie
 				WriteCloser: wr,
 			},
 			inflight: make(map[uint32]chan<- result),
+			closed:   make(chan struct{}),
 		},
 		maxPacket:             1 << 15,
 		maxConcurrentRequests: 64,
@@ -883,7 +884,7 @@ func (f *File) Read(b []byte) (int, error) {
 // maximise throughput for transferring the entire file (especially
 // over high latency links).
 func (f *File) WriteTo(w io.Writer) (int64, error) {
-	fi, err := f.Stat()
+	fi, err := f.c.Stat(f.path)
 	if err != nil {
 		return 0, err
 	}

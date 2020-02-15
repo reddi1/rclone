@@ -3,8 +3,10 @@
 package mounttest
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -17,11 +19,12 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/ncw/rclone/backend/all" // import all the backends
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fs/walk"
-	"github.com/ncw/rclone/fstest"
-	"github.com/ncw/rclone/vfs"
+	_ "github.com/rclone/rclone/backend/all" // import all the backends
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/file"
+	"github.com/rclone/rclone/vfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,6 +79,8 @@ func RunTests(t *testing.T, fn MountFn) {
 			t.Run("TestWriteFileOverwrite", TestWriteFileOverwrite)
 			t.Run("TestWriteFileDoubleClose", TestWriteFileDoubleClose)
 			t.Run("TestWriteFileFsync", TestWriteFileFsync)
+			t.Run("TestWriteFileDup", TestWriteFileDup)
+			t.Run("TestWriteFileAppend", TestWriteFileAppend)
 		})
 		log.Printf("Finished test run with cache mode %v (ok=%v)", cacheMode, ok)
 		if !ok {
@@ -114,12 +119,12 @@ func newRun() *Run {
 	fstest.Initialise()
 
 	var err error
-	r.fremote, r.fremoteName, r.cleanRemote, err = fstest.RandomRemote(*fstest.RemoteName, *fstest.SubDir)
+	r.fremote, r.fremoteName, r.cleanRemote, err = fstest.RandomRemote()
 	if err != nil {
 		log.Fatalf("Failed to open remote %q: %v", *fstest.RemoteName, err)
 	}
 
-	err = r.fremote.Mkdir("")
+	err = r.fremote.Mkdir(context.Background(), "")
 	if err != nil {
 		log.Fatalf("Failed to open mkdir %q: %v", *fstest.RemoteName, err)
 	}
@@ -211,7 +216,7 @@ func (r *Run) cacheMode(cacheMode vfs.CacheMode) {
 	r.vfs.WaitForWriters(30 * time.Second)
 	// Empty and remake the remote
 	r.cleanRemote()
-	err := r.fremote.Mkdir("")
+	err := r.fremote.Mkdir(context.Background(), "")
 	if err != nil {
 		log.Fatalf("Failed to open mkdir %q: %v", *fstest.RemoteName, err)
 	}
@@ -296,7 +301,7 @@ func (r *Run) readLocal(t *testing.T, dir dirMap, filePath string) {
 
 // reads the remote tree into dir
 func (r *Run) readRemote(t *testing.T, dir dirMap, filepath string) {
-	objs, dirs, err := walk.GetAll(r.fremote, filepath, true, 1)
+	objs, dirs, err := walk.GetAll(context.Background(), r.fremote, filepath, true, 1)
 	if err == fs.ErrorDirNotFound {
 		return
 	}
@@ -342,9 +347,36 @@ func (r *Run) waitForWriters() {
 	run.vfs.WaitForWriters(10 * time.Second)
 }
 
+// writeFile writes data to a file named by filename.
+// If the file does not exist, WriteFile creates it with permissions perm;
+// otherwise writeFile truncates it before writing.
+// If there is an error writing then writeFile
+// deletes it an existing file and tries again.
+func writeFile(filename string, data []byte, perm os.FileMode) error {
+	f, err := file.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		err = os.Remove(filename)
+		if err != nil {
+			return err
+		}
+		f, err = file.OpenFile(filename, os.O_WRONLY|os.O_CREATE, perm)
+		if err != nil {
+			return err
+		}
+	}
+	n, err := f.Write(data)
+	if err == nil && n < len(data) {
+		err = io.ErrShortWrite
+	}
+	if err1 := f.Close(); err == nil {
+		err = err1
+	}
+	return err
+}
+
 func (r *Run) createFile(t *testing.T, filepath string, contents string) {
 	filepath = r.path(filepath)
-	err := ioutil.WriteFile(filepath, []byte(contents), 0600)
+	err := writeFile(filepath, []byte(contents), 0600)
 	require.NoError(t, err)
 	r.waitForWriters()
 }

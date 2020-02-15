@@ -7,22 +7,25 @@ package hubic
 // to be revisted after some actual experience.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/ncw/rclone/backend/swift"
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fs/config"
-	"github.com/ncw/rclone/fs/config/configmap"
-	"github.com/ncw/rclone/fs/config/configstruct"
-	"github.com/ncw/rclone/fs/config/obscure"
-	"github.com/ncw/rclone/fs/fshttp"
-	"github.com/ncw/rclone/lib/oauthutil"
 	swiftLib "github.com/ncw/swift"
 	"github.com/pkg/errors"
+	"github.com/rclone/rclone/backend/swift"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/config/obscure"
+	"github.com/rclone/rclone/fs/fshttp"
+	"github.com/rclone/rclone/lib/oauthutil"
 	"golang.org/x/oauth2"
 )
 
@@ -60,13 +63,13 @@ func init() {
 				log.Fatalf("Failed to configure token: %v", err)
 			}
 		},
-		Options: []fs.Option{{
+		Options: append([]fs.Option{{
 			Name: config.ConfigClientID,
 			Help: "Hubic Client Id\nLeave blank normally.",
 		}, {
 			Name: config.ConfigClientSecret,
 			Help: "Hubic Client Secret\nLeave blank normally.",
-		}},
+		}}, swift.SharedOptions...),
 	})
 }
 
@@ -113,18 +116,21 @@ func (f *Fs) String() string {
 // getCredentials reads the OpenStack Credentials using the Hubic API
 //
 // The credentials are read into the Fs
-func (f *Fs) getCredentials() (err error) {
+func (f *Fs) getCredentials(ctx context.Context) (err error) {
 	req, err := http.NewRequest("GET", "https://api.hubic.com/1.0/account/credentials", nil)
 	if err != nil {
 		return err
 	}
+	req = req.WithContext(ctx) // go1.13 can use NewRequestWithContext
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer fs.CheckClose(resp.Body, &err)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return errors.Errorf("failed to get credentials: %s", resp.Status)
+		body, _ := ioutil.ReadAll(resp.Body)
+		bodyStr := strings.TrimSpace(strings.Replace(string(body), "\n", " ", -1))
+		return errors.Errorf("failed to get credentials: %s: %s", resp.Status, bodyStr)
 	}
 	decoder := json.NewDecoder(resp.Body)
 	var result credentials

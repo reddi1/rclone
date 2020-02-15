@@ -23,13 +23,14 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fs/log"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/log"
 )
 
 // DefaultOpt is the default values uses for Opt
@@ -43,13 +44,15 @@ var DefaultOpt = Options{
 	Umask:             0,
 	UID:               ^uint32(0), // these values instruct WinFSP-FUSE to use the current user
 	GID:               ^uint32(0), // overriden for non windows in mount_unix.go
-	DirPerms:          os.FileMode(0777) | os.ModeDir,
+	DirPerms:          os.FileMode(0777),
 	FilePerms:         os.FileMode(0666),
 	CacheMode:         CacheModeOff,
 	CacheMaxAge:       3600 * time.Second,
 	CachePollInterval: 60 * time.Second,
 	ChunkSize:         128 * fs.MebiByte,
 	ChunkSizeLimit:    -1,
+	CacheMaxSize:      -1,
+	CaseInsensitive:   runtime.GOOS == "windows" || runtime.GOOS == "darwin", // default to true on Windows and Mac, false otherwise
 }
 
 // Node represents either a directory (*Dir) or a file (*File)
@@ -176,6 +179,7 @@ type VFS struct {
 	usageMu   sync.Mutex
 	usageTime time.Time
 	usage     *fs.Usage
+	pollChan  chan time.Duration
 }
 
 // Options is options for creating the vfs
@@ -195,7 +199,9 @@ type Options struct {
 	ChunkSizeLimit    fs.SizeSuffix // if > ChunkSize double the chunk size after each chunk until reached
 	CacheMode         CacheMode
 	CacheMaxAge       time.Duration
+	CacheMaxSize      fs.SizeSuffix
 	CachePollInterval time.Duration
+	CaseInsensitive   bool
 }
 
 // New creates a new VFS and root directory.  If opt is nil, then
@@ -223,13 +229,13 @@ func New(f fs.Fs, opt *Options) *VFS {
 	// Create root directory
 	vfs.root = newDir(vfs, f, nil, fsDir)
 
-	// Start polling if required
-	if vfs.Opt.PollInterval > 0 {
-		if do := vfs.f.Features().ChangeNotify; do != nil {
-			do(vfs.notifyFunc, vfs.Opt.PollInterval)
-		} else {
-			fs.Infof(f, "poll-interval is not supported by this remote")
-		}
+	// Start polling function
+	if do := vfs.f.Features().ChangeNotify; do != nil {
+		vfs.pollChan = make(chan time.Duration)
+		do(context.TODO(), vfs.root.changeNotify, vfs.pollChan)
+		vfs.pollChan <- vfs.Opt.PollInterval
+	} else {
+		fs.Infof(f, "poll-interval is not supported by this remote")
 	}
 
 	vfs.SetCacheMode(vfs.Opt.CacheMode)
@@ -239,11 +245,16 @@ func New(f fs.Fs, opt *Options) *VFS {
 	return vfs
 }
 
+// Fs returns the Fs passed into the New call
+func (vfs *VFS) Fs() fs.Fs {
+	return vfs.f
+}
+
 // SetCacheMode change the cache mode
 func (vfs *VFS) SetCacheMode(cacheMode CacheMode) {
 	vfs.Shutdown()
 	vfs.cache = nil
-	if vfs.Opt.CacheMode > CacheModeOff {
+	if cacheMode > CacheModeOff {
 		ctx, cancel := context.WithCancel(context.Background())
 		cache, err := newCache(ctx, vfs.f, &vfs.Opt) // FIXME pass on context or get from Opt?
 		if err != nil {
@@ -252,6 +263,7 @@ func (vfs *VFS) SetCacheMode(cacheMode CacheMode) {
 			cancel()
 			return
 		}
+		vfs.Opt.CacheMode = cacheMode
 		vfs.cancel = cancel
 		vfs.cache = cache
 	}
@@ -290,7 +302,7 @@ func (vfs *VFS) WaitForWriters(timeout time.Duration) {
 	tick.Stop()
 	for {
 		writers := 0
-		vfs.root.walk("", func(d *Dir) {
+		vfs.root.walk(func(d *Dir) {
 			fs.Debugf(d.path, "Looking for writers")
 			// NB d.mu is held by walk() here
 			for leaf, item := range d.items {
@@ -477,7 +489,7 @@ func (vfs *VFS) Statfs() (total, used, free int64) {
 	}
 	if vfs.usageTime.IsZero() || time.Since(vfs.usageTime) >= vfs.Opt.DirCacheTime {
 		var err error
-		vfs.usage, err = doAbout()
+		vfs.usage, err = doAbout(context.TODO())
 		vfs.usageTime = time.Now()
 		if err != nil {
 			fs.Errorf(vfs.f, "Statfs failed: %v", err)
@@ -496,14 +508,4 @@ func (vfs *VFS) Statfs() (total, used, free int64) {
 		}
 	}
 	return
-}
-
-// notifyFunc removes the last path segement for directories and calls ForgetPath with the result.
-//
-// This ensures that new or renamed directories appear in their parent.
-func (vfs *VFS) notifyFunc(relativePath string, entryType fs.EntryType) {
-	if entryType == fs.EntryDirectory {
-		relativePath = path.Dir(relativePath)
-	}
-	vfs.root.ForgetPath(relativePath, entryType)
 }
