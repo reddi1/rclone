@@ -1,20 +1,22 @@
 package http
 
 import (
+	"fmt"
+	"html/template"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
 	"strings"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/cmd/serve/httplib"
-	"github.com/rclone/rclone/cmd/serve/httplib/httpflags"
-	"github.com/rclone/rclone/cmd/serve/httplib/serve"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/accounting"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/cmd/serve/httplib"
+	"github.com/ncw/rclone/cmd/serve/httplib/httpflags"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/accounting"
+	"github.com/ncw/rclone/lib/rest"
+	"github.com/ncw/rclone/vfs"
+	"github.com/ncw/rclone/vfs/vfsflags"
 	"github.com/spf13/cobra"
 )
 
@@ -44,11 +46,7 @@ control the stats printing.
 		f := cmd.NewFsSrc(args)
 		cmd.Run(false, true, command, func() error {
 			s := newServer(f, &httpflags.Opt)
-			err := s.Serve()
-			if err != nil {
-				return err
-			}
-			s.Wait()
+			s.serve()
 			return nil
 		})
 	},
@@ -56,32 +54,30 @@ control the stats printing.
 
 // server contains everything to run the server
 type server struct {
-	*httplib.Server
 	f   fs.Fs
 	vfs *vfs.VFS
+	srv *httplib.Server
 }
 
 func newServer(f fs.Fs, opt *httplib.Options) *server {
 	mux := http.NewServeMux()
 	s := &server{
-		Server: httplib.NewServer(mux, opt),
-		f:      f,
-		vfs:    vfs.New(f, &vfsflags.Opt),
+		f:   f,
+		vfs: vfs.New(f, &vfsflags.Opt),
+		srv: httplib.NewServer(mux, opt),
 	}
-	mux.HandleFunc(s.Opt.BaseURL+"/", s.handler)
+	mux.HandleFunc("/", s.handler)
 	return s
 }
 
-// Serve runs the http server in the background.
-//
-// Use s.Close() and s.Wait() to shutdown server
-func (s *server) Serve() error {
-	err := s.Server.Serve()
+// serve runs the http server - doesn't return
+func (s *server) serve() {
+	err := s.srv.Serve()
 	if err != nil {
-		return err
+		fs.Errorf(s.f, "Opening listener: %v", err)
 	}
-	fs.Logf(s.f, "Serving on %s", s.URL())
-	return nil
+	fs.Logf(s.f, "Serving on %s", s.srv.URL())
+	s.srv.Wait()
 }
 
 // handler reads incoming requests and dispatches them
@@ -93,10 +89,7 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Server", "rclone/"+fs.Version)
 
-	urlPath, ok := s.Path(w, r)
-	if !ok {
-		return
-	}
+	urlPath := r.URL.Path
 	isDir := strings.HasSuffix(urlPath, "/")
 	remote := strings.Trim(urlPath, "/")
 	if isDir {
@@ -104,6 +97,62 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.serveFile(w, r, remote)
 	}
+}
+
+// entry is a directory entry
+type entry struct {
+	remote string
+	URL    string
+	Leaf   string
+}
+
+// entries represents a directory
+type entries []entry
+
+// addEntry adds an entry to that directory
+func (es *entries) addEntry(node interface {
+	Path() string
+	Name() string
+	IsDir() bool
+}) {
+	remote := node.Path()
+	leaf := node.Name()
+	urlRemote := leaf
+	if node.IsDir() {
+		leaf += "/"
+		urlRemote += "/"
+	}
+	*es = append(*es, entry{remote: remote, URL: rest.URLPathEscape(urlRemote), Leaf: leaf})
+}
+
+// indexPage is a directory listing template
+var indexPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ .Title }}</title>
+</head>
+<body>
+<h1>{{ .Title }}</h1>
+{{ range $i := .Entries }}<a href="{{ $i.URL }}">{{ $i.Leaf }}</a><br />
+{{ end }}</body>
+</html>
+`
+
+// indexTemplate is the instantiated indexPage
+var indexTemplate = template.Must(template.New("index").Parse(indexPage))
+
+// indexData is used to fill in the indexTemplate
+type indexData struct {
+	Title   string
+	Entries entries
+}
+
+// error returns an http.StatusInternalServerError and logs the error
+func internalError(what interface{}, w http.ResponseWriter, text string, err error) {
+	fs.CountError(err)
+	fs.Errorf(what, "%s: %v", text, err)
+	http.Error(w, text+".", http.StatusInternalServerError)
 }
 
 // serveDir serves a directory index at dirRemote
@@ -114,7 +163,7 @@ func (s *server) serveDir(w http.ResponseWriter, r *http.Request, dirRemote stri
 		http.Error(w, "Directory not found", http.StatusNotFound)
 		return
 	} else if err != nil {
-		serve.Error(dirRemote, w, "Failed to list directory", err)
+		internalError(dirRemote, w, "Failed to list directory", err)
 		return
 	}
 	if !node.IsDir() {
@@ -124,17 +173,28 @@ func (s *server) serveDir(w http.ResponseWriter, r *http.Request, dirRemote stri
 	dir := node.(*vfs.Dir)
 	dirEntries, err := dir.ReadDirAll()
 	if err != nil {
-		serve.Error(dirRemote, w, "Failed to list directory", err)
+		internalError(dirRemote, w, "Failed to list directory", err)
 		return
 	}
 
-	// Make the entries for display
-	directory := serve.NewDirectory(dirRemote, s.HTMLTemplate)
+	var out entries
 	for _, node := range dirEntries {
-		directory.AddEntry(node.Path(), node.IsDir())
+		out.addEntry(node)
 	}
 
-	directory.Serve(w, r)
+	// Account the transfer
+	accounting.Stats.Transferring(dirRemote)
+	defer accounting.Stats.DoneTransferring(dirRemote, true)
+
+	fs.Infof(dirRemote, "%s: Serving directory", r.RemoteAddr)
+	err = indexTemplate.Execute(w, indexData{
+		Entries: out,
+		Title:   fmt.Sprintf("Directory listing of /%s", dirRemote),
+	})
+	if err != nil {
+		internalError(dirRemote, w, "Failed to render template", err)
+		return
+	}
 }
 
 // serveFile serves a file object at remote
@@ -145,7 +205,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, remote string
 		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	} else if err != nil {
-		serve.Error(remote, w, "Failed to find file", err)
+		internalError(remote, w, "Failed to find file", err)
 		return
 	}
 	if !node.IsFile() {
@@ -164,7 +224,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, remote string
 	w.Header().Set("Content-Length", strconv.FormatInt(node.Size(), 10))
 
 	// Set content type
-	mimeType := fs.MimeType(r.Context(), obj)
+	mimeType := fs.MimeType(obj)
 	if mimeType == "application/octet-stream" && path.Ext(remote) == "" {
 		// Leave header blank so http server guesses
 	} else {
@@ -179,7 +239,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, remote string
 	// open the object
 	in, err := file.Open(os.O_RDONLY)
 	if err != nil {
-		serve.Error(remote, w, "Failed to open file", err)
+		internalError(remote, w, "Failed to open file", err)
 		return
 	}
 	defer func() {
@@ -190,8 +250,8 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, remote string
 	}()
 
 	// Account the transfer
-	tr := accounting.Stats(r.Context()).NewTransfer(obj)
-	defer tr.Done(nil)
+	accounting.Stats.Transferring(remote)
+	defer accounting.Stats.DoneTransferring(remote, true)
 	// FIXME in = fs.NewAccount(in, obj).WithBuffer() // account the transfer
 
 	// Serve the file

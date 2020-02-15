@@ -3,11 +3,10 @@ package version
 import (
 	"io/ioutil"
 	"os"
-	"runtime"
 	"testing"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/config"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/config"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -21,9 +20,7 @@ func TestVersionWorksWithoutAccessibleConfigFile(t *testing.T) {
 		assert.NoError(t, err)
 	}()
 	assert.NoError(t, tempFile.Close())
-	if runtime.GOOS != "windows" {
-		assert.NoError(t, os.Chmod(path, 0000))
-	}
+	assert.NoError(t, os.Chmod(path, 0000))
 	// re-wire
 	oldOsStdout := os.Stdout
 	oldConfigPath := config.ConfigPath
@@ -39,9 +36,8 @@ func TestVersionWorksWithoutAccessibleConfigFile(t *testing.T) {
 		assert.NoError(t, cmd.Root.Execute())
 	})
 
-	// This causes rclone to exit and the tests to stop!
-	// cmd.Root.SetArgs([]string{"--version"})
-	// assert.NotPanics(t, func() {
-	// 	assert.NoError(t, cmd.Root.Execute())
-	// })
+	cmd.Root.SetArgs([]string{"--version"})
+	assert.NotPanics(t, func() {
+		assert.NoError(t, cmd.Root.Execute())
+	})
 }

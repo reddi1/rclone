@@ -2,8 +2,6 @@
 package local
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -17,23 +15,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/config/configmap"
+	"github.com/ncw/rclone/fs/config/configstruct"
+	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/lib/readers"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/accounting"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/config/configmap"
-	"github.com/rclone/rclone/fs/config/configstruct"
-	"github.com/rclone/rclone/fs/fserrors"
-	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/lib/encoder"
-	"github.com/rclone/rclone/lib/file"
-	"github.com/rclone/rclone/lib/readers"
 )
 
 // Constants
-const devUnset = 0xdeadbeefcafebabe                                       // a device id meaning it is unset
-const linkSuffix = ".rclonelink"                                          // The suffix added to a translated symbolic link
-const useReadDir = (runtime.GOOS == "windows" || runtime.GOOS == "plan9") // these OSes read FileInfos directly
+const devUnset = 0xdeadbeefcafebabe // a device id meaning it is unset
 
 // Register with Fs
 func init() {
@@ -56,40 +47,19 @@ func init() {
 			ShortOpt: "L",
 			Advanced: true,
 		}, {
-			Name:     "links",
-			Help:     "Translate symlinks to/from regular files with a '" + linkSuffix + "' extension",
-			Default:  false,
-			NoPrefix: true,
-			ShortOpt: "l",
-			Advanced: true,
-		}, {
-			Name: "skip_links",
-			Help: `Don't warn about skipped symlinks.
-This flag disables warning messages on skipped symlinks or junction
-points, as you explicitly acknowledge that they should be skipped.`,
+			Name:     "skip_links",
+			Help:     "Don't warn about skipped symlinks.",
 			Default:  false,
 			NoPrefix: true,
 			Advanced: true,
 		}, {
-			Name: "no_unicode_normalization",
-			Help: `Don't apply unicode normalization to paths and filenames (Deprecated)
-
-This flag is deprecated now.  Rclone no longer normalizes unicode file
-names, but it compares them with unicode normalization in the sync
-routine instead.`,
+			Name:     "no_unicode_normalization",
+			Help:     "Don't apply unicode normalization to paths and filenames",
 			Default:  false,
 			Advanced: true,
 		}, {
-			Name: "no_check_updated",
-			Help: `Don't check to see if the files change during upload
-
-Normally rclone checks the size and modification time of files as they
-are being uploaded and aborts with a message which starts "can't copy
-- source file is being updated" if the file changes during upload.
-
-However on some file systems this modification time check may fail (eg
-[Glusterfs #2206](https://github.com/rclone/rclone/issues/2206)) so this
-check can be disabled with this flag.`,
+			Name:     "no_check_updated",
+			Help:     "Don't check to see if the files change during upload",
 			Default:  false,
 			Advanced: true,
 		}, {
@@ -99,29 +69,6 @@ check can be disabled with this flag.`,
 			NoPrefix: true,
 			ShortOpt: "x",
 			Advanced: true,
-		}, {
-			Name: "case_sensitive",
-			Help: `Force the filesystem to report itself as case sensitive.
-
-Normally the local backend declares itself as case insensitive on
-Windows/macOS and case sensitive for everything else.  Use this flag
-to override the default choice.`,
-			Default:  false,
-			Advanced: true,
-		}, {
-			Name: "case_insensitive",
-			Help: `Force the filesystem to report itself as case insensitive
-
-Normally the local backend declares itself as case insensitive on
-Windows/macOS and case sensitive for everything else.  Use this flag
-to override the default choice.`,
-			Default:  false,
-			Advanced: true,
-		}, {
-			Name:     config.ConfigEncoding,
-			Help:     config.ConfigEncodingHelp,
-			Advanced: true,
-			Default:  defaultEnc,
 		}},
 	}
 	fs.Register(fsi)
@@ -129,16 +76,12 @@ to override the default choice.`,
 
 // Options defines the configuration for this backend
 type Options struct {
-	FollowSymlinks    bool                 `config:"copy_links"`
-	TranslateSymlinks bool                 `config:"links"`
-	SkipSymlinks      bool                 `config:"skip_links"`
-	NoUTFNorm         bool                 `config:"no_unicode_normalization"`
-	NoCheckUpdated    bool                 `config:"no_check_updated"`
-	NoUNC             bool                 `config:"nounc"`
-	OneFileSystem     bool                 `config:"one_file_system"`
-	CaseSensitive     bool                 `config:"case_sensitive"`
-	CaseInsensitive   bool                 `config:"case_insensitive"`
-	Enc               encoder.MultiEncoder `config:"encoding"`
+	FollowSymlinks bool `config:"copy_links"`
+	SkipSymlinks   bool `config:"skip_links"`
+	NoUTFNorm      bool `config:"no_unicode_normalization"`
+	NoCheckUpdated bool `config:"no_check_updated"`
+	NoUNC          bool `config:"nounc"`
+	OneFileSystem  bool `config:"one_file_system"`
 }
 
 // Fs represents a local filesystem rooted at root
@@ -150,29 +93,26 @@ type Fs struct {
 	dev         uint64              // device number of root node
 	precisionOk sync.Once           // Whether we need to read the precision
 	precision   time.Duration       // precision of local filesystem
-	warnedMu    sync.Mutex          // used for locking access to 'warned'.
+	wmu         sync.Mutex          // used for locking access to 'warned'.
 	warned      map[string]struct{} // whether we have warned about this string
-
 	// do os.Lstat or os.Stat
 	lstat          func(name string) (os.FileInfo, error)
+	dirNames       *mapper    // directory name mapping
 	objectHashesMu sync.Mutex // global lock for Object.hashes
 }
 
 // Object represents a local filesystem object
 type Object struct {
-	fs             *Fs    // The Fs this object is part of
-	remote         string // The remote path (encoded path)
-	path           string // The local path (OS path)
-	size           int64  // file metadata - always present
-	mode           os.FileMode
-	modTime        time.Time
-	hashes         map[hash.Type]string // Hashes
-	translatedLink bool                 // Is this object a translated link
+	fs      *Fs    // The Fs this object is part of
+	remote  string // The remote path - properly UTF-8 encoded - for rclone
+	path    string // The local path - may not be properly UTF-8 encoded - for OS
+	size    int64  // file metadata - always present
+	mode    os.FileMode
+	modTime time.Time
+	hashes  map[hash.Type]string // Hashes
 }
 
 // ------------------------------------------------------------
-
-var errLinksAndCopyLinks = errors.New("can't use -l/--links with -L/--copy-links")
 
 // NewFs constructs an Fs from the path
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
@@ -182,26 +122,23 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opt.TranslateSymlinks && opt.FollowSymlinks {
-		return nil, errLinksAndCopyLinks
-	}
 
 	if opt.NoUTFNorm {
 		fs.Errorf(nil, "The --local-no-unicode-normalization flag is deprecated and will be removed")
 	}
 
 	f := &Fs{
-		name:   name,
-		opt:    *opt,
-		warned: make(map[string]struct{}),
-		dev:    devUnset,
-		lstat:  os.Lstat,
+		name:     name,
+		opt:      *opt,
+		warned:   make(map[string]struct{}),
+		dev:      devUnset,
+		lstat:    os.Lstat,
+		dirNames: newMapper(),
 	}
-	f.root = cleanRootPath(root, f.opt.NoUNC, f.opt.Enc)
+	f.root = f.cleanPath(root)
 	f.features = (&fs.Features{
 		CaseInsensitive:         f.caseInsensitive(),
 		CanHaveEmptyDirectories: true,
-		IsLocal:                 true,
 	}).Fill(f)
 	if opt.FollowSymlinks {
 		f.lstat = os.Stat
@@ -212,27 +149,13 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if err == nil {
 		f.dev = readDevice(fi, f.opt.OneFileSystem)
 	}
-	if err == nil && f.isRegular(fi.Mode()) {
+	if err == nil && fi.Mode().IsRegular() {
 		// It is a file, so use the parent as the root
-		f.root = filepath.Dir(f.root)
+		f.root, _ = getDirFile(f.root)
 		// return an error with an fs which points to the parent
 		return f, fs.ErrorIsFile
 	}
 	return f, nil
-}
-
-// Determine whether a file is a 'regular' file,
-// Symlinks are regular files, only if the TranslateSymlink
-// option is in-effect
-func (f *Fs) isRegular(mode os.FileMode) bool {
-	if !f.opt.TranslateSymlinks {
-		return mode.IsRegular()
-	}
-
-	// fi.Mode().IsRegular() tests that all mode bits are zero
-	// Since symlinks are accepted, test that all other bits are zero,
-	// except the symlink bit
-	return mode&os.ModeType&^os.ModeSymlink == 0
 }
 
 // Name of the remote (as passed into NewFs)
@@ -242,12 +165,12 @@ func (f *Fs) Name() string {
 
 // Root of the remote (as passed into NewFs)
 func (f *Fs) Root() string {
-	return f.opt.Enc.ToStandardPath(filepath.ToSlash(f.root))
+	return f.root
 }
 
 // String converts this Fs to a string
 func (f *Fs) String() string {
-	return fmt.Sprintf("Local file system at %s", f.Root())
+	return fmt.Sprintf("Local file system at %s", f.root)
 }
 
 // Features returns the optional features of this Fs
@@ -255,56 +178,36 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
-// caseInsensitive returns whether the remote is case insensitive or not
+// caseInsenstive returns whether the remote is case insensitive or not
 func (f *Fs) caseInsensitive() bool {
-	if f.opt.CaseSensitive {
-		return false
-	}
-	if f.opt.CaseInsensitive {
-		return true
-	}
 	// FIXME not entirely accurate since you can have case
-	// sensitive Fses on darwin and case insensitive Fses on linux.
+	// sensitive Fses on darwin and case insenstive Fses on linux.
 	// Should probably check but that would involve creating a
 	// file in the remote to be most accurate which probably isn't
 	// desirable.
 	return runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 }
 
-// translateLink checks whether the remote is a translated link
-// and returns a new path, removing the suffix as needed,
-// It also returns whether this is a translated link at all
-//
-// for regular files, localPath is returned unchanged
-func translateLink(remote, localPath string) (newLocalPath string, isTranslatedLink bool) {
-	isTranslatedLink = strings.HasSuffix(remote, linkSuffix)
-	newLocalPath = strings.TrimSuffix(localPath, linkSuffix)
-	return newLocalPath, isTranslatedLink
-}
-
 // newObject makes a half completed Object
-func (f *Fs) newObject(remote string) *Object {
-	translatedLink := false
-	localPath := f.localPath(remote)
-
-	if f.opt.TranslateSymlinks {
-		// Possibly receive a new name for localPath
-		localPath, translatedLink = translateLink(remote, localPath)
+//
+// if dstPath is empty then it is made from remote
+func (f *Fs) newObject(remote, dstPath string) *Object {
+	if dstPath == "" {
+		dstPath = f.cleanPath(filepath.Join(f.root, remote))
 	}
-
+	remote = f.cleanRemote(remote)
 	return &Object{
-		fs:             f,
-		remote:         remote,
-		path:           localPath,
-		translatedLink: translatedLink,
+		fs:     f,
+		remote: remote,
+		path:   dstPath,
 	}
 }
 
 // Return an Object from a path
 //
 // May return nil if an error occurred
-func (f *Fs) newObjectWithInfo(remote string, info os.FileInfo) (fs.Object, error) {
-	o := f.newObject(remote)
+func (f *Fs) newObjectWithInfo(remote, dstPath string, info os.FileInfo) (fs.Object, error) {
+	o := f.newObject(remote, dstPath)
 	if info != nil {
 		o.setMetadata(info)
 	} else {
@@ -318,11 +221,6 @@ func (f *Fs) newObjectWithInfo(remote string, info os.FileInfo) (fs.Object, erro
 			}
 			return nil, err
 		}
-		// Handle the odd case, that a symlink was specified by name without the link suffix
-		if o.fs.opt.TranslateSymlinks && o.mode&os.ModeSymlink != 0 && !o.translatedLink {
-			return nil, fs.ErrorObjectNotFound
-		}
-
 	}
 	if o.mode.IsDir() {
 		return nil, errors.Wrapf(fs.ErrorNotAFile, "%q", remote)
@@ -332,8 +230,8 @@ func (f *Fs) newObjectWithInfo(remote string, info os.FileInfo) (fs.Object, erro
 
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error ErrorObjectNotFound.
-func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	return f.newObjectWithInfo(remote, nil)
+func (f *Fs) NewObject(remote string) (fs.Object, error) {
+	return f.newObjectWithInfo(remote, "", nil)
 }
 
 // List the objects and directories in dir into entries.  The
@@ -345,8 +243,10 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 //
 // This should return ErrDirNotFound if the directory isn't
 // found.
-func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	fsDirPath := f.localPath(dir)
+func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
+	dir = f.dirNames.Load(dir)
+	fsDirPath := f.cleanPath(filepath.Join(f.root, dir))
+	remote := f.cleanRemote(dir)
 	_, err = os.Stat(fsDirPath)
 	if err != nil {
 		return nil, fs.ErrorDirNotFound
@@ -354,14 +254,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 	fd, err := os.Open(fsDirPath)
 	if err != nil {
-		isPerm := os.IsPermission(err)
-		err = errors.Wrapf(err, "failed to open directory %q", dir)
-		fs.Errorf(dir, "%v", err)
-		if isPerm {
-			_ = accounting.Stats(ctx).Error(fserrors.NoRetryError(err))
-			err = nil // ignore error but fail sync
-		}
-		return nil, err
+		return nil, errors.Wrapf(err, "failed to open directory %q", dir)
 	}
 	defer func() {
 		cerr := fd.Close()
@@ -371,55 +264,22 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	}()
 
 	for {
-		var fis []os.FileInfo
-		if useReadDir {
-			// Windows and Plan9 read the directory entries with the stat information in which
-			// shouldn't fail because of unreadable entries.
-			fis, err = fd.Readdir(1024)
-			if err == io.EOF && len(fis) == 0 {
-				break
-			}
-		} else {
-			// For other OSes we read the names only (which shouldn't fail) then stat the
-			// individual ourselves so we can log errors but not fail the directory read.
-			var names []string
-			names, err = fd.Readdirnames(1024)
-			if err == io.EOF && len(names) == 0 {
-				break
-			}
-			if err == nil {
-				for _, name := range names {
-					namepath := filepath.Join(fsDirPath, name)
-					fi, fierr := os.Lstat(namepath)
-					if fierr != nil {
-						err = errors.Wrapf(err, "failed to read directory %q", namepath)
-						fs.Errorf(dir, "%v", fierr)
-						_ = accounting.Stats(ctx).Error(fserrors.NoRetryError(fierr)) // fail the sync
-						continue
-					}
-					fis = append(fis, fi)
-				}
-			}
+		fis, err := fd.Readdir(1024)
+		if err == io.EOF && len(fis) == 0 {
+			break
 		}
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to read directory entry")
+			return nil, errors.Wrapf(err, "failed to read directory %q", dir)
 		}
 
 		for _, fi := range fis {
 			name := fi.Name()
 			mode := fi.Mode()
-			newRemote := f.cleanRemote(dir, name)
+			newRemote := path.Join(remote, name)
+			newPath := filepath.Join(fsDirPath, name)
 			// Follow symlinks if required
 			if f.opt.FollowSymlinks && (mode&os.ModeSymlink) != 0 {
-				localPath := filepath.Join(fsDirPath, name)
-				fi, err = os.Stat(localPath)
-				if os.IsNotExist(err) {
-					// Skip bad symlinks
-					err = fserrors.NoRetryError(errors.Wrap(err, "symlink"))
-					fs.Errorf(newRemote, "Listing error: %v", err)
-					err = accounting.Stats(ctx).Error(err)
-					continue
-				}
+				fi, err = os.Stat(newPath)
 				if err != nil {
 					return nil, err
 				}
@@ -429,15 +289,11 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 				// Ignore directories which are symlinks.  These are junction points under windows which
 				// are kind of a souped up symlink. Unix doesn't have directories which are symlinks.
 				if (mode&os.ModeSymlink) == 0 && f.dev == readDevice(fi, f.opt.OneFileSystem) {
-					d := fs.NewDir(newRemote, fi.ModTime())
+					d := fs.NewDir(f.dirNames.Save(newRemote, f.cleanRemote(newRemote)), fi.ModTime())
 					entries = append(entries, d)
 				}
 			} else {
-				// Check whether this link should be translated
-				if f.opt.TranslateSymlinks && fi.Mode()&os.ModeSymlink != 0 {
-					newRemote += linkSuffix
-				}
-				fso, err := f.newObjectWithInfo(newRemote, fi)
+				fso, err := f.newObjectWithInfo(newRemote, newPath, fi)
 				if err != nil {
 					return nil, err
 				}
@@ -450,29 +306,68 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	return entries, nil
 }
 
-func (f *Fs) cleanRemote(dir, filename string) (remote string) {
-	remote = path.Join(dir, f.opt.Enc.ToStandardName(filename))
-
-	if !utf8.ValidString(filename) {
-		f.warnedMu.Lock()
-		if _, ok := f.warned[remote]; !ok {
-			fs.Logf(f, "Replacing invalid UTF-8 characters in %q", remote)
-			f.warned[remote] = struct{}{}
+// cleanRemote makes string a valid UTF-8 string for remote strings.
+//
+// Any invalid UTF-8 characters will be replaced with utf8.RuneError
+// It also normalises the UTF-8 and converts the slashes if necessary.
+func (f *Fs) cleanRemote(name string) string {
+	if !utf8.ValidString(name) {
+		f.wmu.Lock()
+		if _, ok := f.warned[name]; !ok {
+			fs.Logf(f, "Replacing invalid UTF-8 characters in %q", name)
+			f.warned[name] = struct{}{}
 		}
-		f.warnedMu.Unlock()
+		f.wmu.Unlock()
+		name = string([]rune(name))
 	}
-	return
+	name = filepath.ToSlash(name)
+	return name
 }
 
-func (f *Fs) localPath(name string) string {
-	return filepath.Join(f.root, filepath.FromSlash(f.opt.Enc.FromStandardPath(name)))
+// mapper maps raw to cleaned directory names
+type mapper struct {
+	mu sync.RWMutex      // mutex to protect the below
+	m  map[string]string // map of un-normalised directory names
+}
+
+func newMapper() *mapper {
+	return &mapper{
+		m: make(map[string]string),
+	}
+}
+
+// Lookup a directory name to make a local name (reverses
+// cleanDirName)
+//
+// FIXME this is temporary before we make a proper Directory object
+func (m *mapper) Load(in string) string {
+	m.mu.RLock()
+	out, ok := m.m[in]
+	m.mu.RUnlock()
+	if ok {
+		return out
+	}
+	return in
+}
+
+// Cleans a directory name recording if it needed to be altered
+//
+// FIXME this is temporary before we make a proper Directory object
+func (m *mapper) Save(in, out string) string {
+	if in != out {
+		m.mu.Lock()
+		m.m[out] = in
+		m.mu.Unlock()
+	}
+	return out
 }
 
 // Put the Object to the local filesystem
-func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	remote := src.Remote()
 	// Temporary Object under construction - info filled in by Update()
-	o := f.newObject(src.Remote())
-	err := o.Update(ctx, in, src, options...)
+	o := f.newObject(remote, "")
+	err := o.Update(in, src, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -480,20 +375,20 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 }
 
 // PutStream uploads to the remote path with the modTime given of indeterminate size
-func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return f.Put(ctx, in, src, options...)
+func (f *Fs) PutStream(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	return f.Put(in, src, options...)
 }
 
 // Mkdir creates the directory if it doesn't exist
-func (f *Fs) Mkdir(ctx context.Context, dir string) error {
+func (f *Fs) Mkdir(dir string) error {
 	// FIXME: https://github.com/syncthing/syncthing/blob/master/lib/osutil/mkdirall_windows.go
-	localPath := f.localPath(dir)
-	err := os.MkdirAll(localPath, 0777)
+	root := f.cleanPath(filepath.Join(f.root, dir))
+	err := os.MkdirAll(root, 0777)
 	if err != nil {
 		return err
 	}
 	if dir == "" {
-		fi, err := f.lstat(localPath)
+		fi, err := f.lstat(root)
 		if err != nil {
 			return err
 		}
@@ -505,8 +400,9 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 // Rmdir removes the directory
 //
 // If it isn't empty it will return an error
-func (f *Fs) Rmdir(ctx context.Context, dir string) error {
-	return os.Remove(f.localPath(dir))
+func (f *Fs) Rmdir(dir string) error {
+	root := f.cleanPath(filepath.Join(f.root, dir))
+	return os.Remove(root)
 }
 
 // Precision of the file system
@@ -560,7 +456,7 @@ func (f *Fs) readPrecision() (precision time.Duration) {
 		}
 
 		// If it matches - have found the precision
-		// fmt.Println("compare", fi.ModTime(ctx), t)
+		// fmt.Println("compare", fi.ModTime(), t)
 		if fi.ModTime().Equal(t) {
 			// fmt.Println("Precision detected as", duration)
 			return duration
@@ -574,7 +470,7 @@ func (f *Fs) readPrecision() (precision time.Duration) {
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
+func (f *Fs) Purge() error {
 	fi, err := f.lstat(f.root)
 	if err != nil {
 		return err
@@ -594,7 +490,7 @@ func (f *Fs) Purge(ctx context.Context) error {
 // Will only be called if src.Fs().Name() == f.Name()
 //
 // If it isn't possible then return fs.ErrorCantMove
-func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 	srcObj, ok := src.(*Object)
 	if !ok {
 		fs.Debugf(src, "Can't move - not same remote type")
@@ -602,7 +498,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 
 	// Temporary Object under construction
-	dstObj := f.newObject(remote)
+	dstObj := f.newObject(remote, "")
 
 	// Check it is a file if it exists
 	err := dstObj.lstat()
@@ -610,7 +506,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		// OK
 	} else if err != nil {
 		return nil, err
-	} else if !dstObj.fs.isRegular(dstObj.mode) {
+	} else if !dstObj.mode.IsRegular() {
 		// It isn't a file
 		return nil, errors.New("can't move file onto non-file")
 	}
@@ -653,14 +549,14 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 // If it isn't possible then return fs.ErrorCantDirMove
 //
 // If destination exists then return fs.ErrorDirExists
-func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
+func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 	srcFs, ok := src.(*Fs)
 	if !ok {
 		fs.Debugf(srcFs, "Can't move directory - not same remote type")
 		return fs.ErrorCantDirMove
 	}
-	srcPath := srcFs.localPath(srcRemote)
-	dstPath := f.localPath(dstRemote)
+	srcPath := f.cleanPath(filepath.Join(srcFs.root, srcRemote))
+	dstPath := f.cleanPath(filepath.Join(f.root, dstRemote))
 
 	// Check if destination exists
 	_, err := os.Lstat(dstPath)
@@ -669,7 +565,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	}
 
 	// Create parent of destination
-	dstParentPath := filepath.Dir(dstPath)
+	dstParentPath, _ := getDirFile(dstPath)
 	err = os.MkdirAll(dstParentPath, 0777)
 	if err != nil {
 		return err
@@ -694,7 +590,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 // Hashes returns the supported hash sets.
 func (f *Fs) Hashes() hash.Set {
-	return hash.Supported()
+	return hash.Supported
 }
 
 // ------------------------------------------------------------
@@ -718,7 +614,7 @@ func (o *Object) Remote() string {
 }
 
 // Hash returns the requested hash of a file as a lowercase hex string
-func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
+func (o *Object) Hash(r hash.Type) (string, error) {
 	// Check that the underlying file hasn't changed
 	oldtime := o.modTime
 	oldsize := o.size
@@ -729,25 +625,14 @@ func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
 
 	o.fs.objectHashesMu.Lock()
 	hashes := o.hashes
-	hashValue, hashFound := o.hashes[r]
 	o.fs.objectHashesMu.Unlock()
 
-	if !o.modTime.Equal(oldtime) || oldsize != o.size || hashes == nil || !hashFound {
-		var in io.ReadCloser
-
-		if !o.translatedLink {
-			var fd *os.File
-			fd, err = file.Open(o.path)
-			if fd != nil {
-				in = newFadviseReadCloser(o, fd, 0, 0)
-			}
-		} else {
-			in, err = o.openTranslatedLink(0, -1)
-		}
+	if !o.modTime.Equal(oldtime) || oldsize != o.size || hashes == nil {
+		in, err := os.Open(o.path)
 		if err != nil {
 			return "", errors.Wrap(err, "hash: failed to open")
 		}
-		hashes, err = hash.StreamTypes(in, hash.NewHashSet(r))
+		hashes, err = hash.Stream(in)
 		closeErr := in.Close()
 		if err != nil {
 			return "", errors.Wrap(err, "hash: failed to read")
@@ -755,16 +640,11 @@ func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
 		if closeErr != nil {
 			return "", errors.Wrap(closeErr, "hash: failed to close")
 		}
-		hashValue = hashes[r]
 		o.fs.objectHashesMu.Lock()
-		if o.hashes == nil {
-			o.hashes = hashes
-		} else {
-			o.hashes[r] = hashValue
-		}
+		o.hashes = hashes
 		o.fs.objectHashesMu.Unlock()
 	}
-	return hashValue, nil
+	return hashes[r], nil
 }
 
 // Size returns the size of an object in bytes
@@ -773,18 +653,13 @@ func (o *Object) Size() int64 {
 }
 
 // ModTime returns the modification time of the object
-func (o *Object) ModTime(ctx context.Context) time.Time {
+func (o *Object) ModTime() time.Time {
 	return o.modTime
 }
 
 // SetModTime sets the modification time of the local fs object
-func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	var err error
-	if o.translatedLink {
-		err = lChtimes(o.path, modTime, modTime)
-	} else {
-		err = os.Chtimes(o.path, modTime, modTime)
-	}
+func (o *Object) SetModTime(modTime time.Time) error {
+	err := os.Chtimes(o.path, modTime, modTime)
 	if err != nil {
 		return err
 	}
@@ -794,8 +669,15 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 
 // Storable returns a boolean showing if this object is storable
 func (o *Object) Storable() bool {
+	// Check for control characters in the remote name and show non storable
+	for _, c := range o.Remote() {
+		if c >= 0x00 && c < 0x20 || c == 0x7F {
+			fs.Logf(o.fs, "Can't store file with control characters: %q", o.Remote())
+			return false
+		}
+	}
 	mode := o.mode
-	if mode&os.ModeSymlink != 0 && !o.fs.opt.TranslateSymlinks {
+	if mode&os.ModeSymlink != 0 {
 		if !o.fs.opt.SkipSymlinks {
 			fs.Logf(o, "Can't follow symlink without -L/--copy-links")
 		}
@@ -828,10 +710,10 @@ func (file *localOpenFile) Read(p []byte) (n int, err error) {
 			return 0, errors.Wrap(err, "can't read status of source file while transferring")
 		}
 		if file.o.size != fi.Size() {
-			return 0, fserrors.NoLowLevelRetryError(errors.Errorf("can't copy - source file is being updated (size changed from %d to %d)", file.o.size, fi.Size()))
+			return 0, errors.Errorf("can't copy - source file is being updated (size changed from %d to %d)", file.o.size, fi.Size())
 		}
 		if !file.o.modTime.Equal(fi.ModTime()) {
-			return 0, fserrors.NoLowLevelRetryError(errors.Errorf("can't copy - source file is being updated (mod time changed from %v to %v)", file.o.modTime, fi.ModTime()))
+			return 0, errors.Errorf("can't copy - source file is being updated (mod time changed from %v to %v)", file.o.modTime, fi.ModTime())
 		}
 	}
 
@@ -856,20 +738,10 @@ func (file *localOpenFile) Close() (err error) {
 	return err
 }
 
-// Returns a ReadCloser() object that contains the contents of a symbolic link
-func (o *Object) openTranslatedLink(offset, limit int64) (lrc io.ReadCloser, err error) {
-	// Read the link and return the destination  it as the contents of the object
-	linkdst, err := os.Readlink(o.path)
-	if err != nil {
-		return nil, err
-	}
-	return readers.NewLimitedReadCloser(ioutil.NopCloser(strings.NewReader(linkdst[offset:])), limit), nil
-}
-
 // Open an object for read
-func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	var offset, limit int64 = 0, -1
-	var hasher *hash.MultiHasher
+	hashes := hash.Supported
 	for _, option := range options {
 		switch x := option.(type) {
 		case *fs.SeekOption:
@@ -877,12 +749,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		case *fs.RangeOption:
 			offset, limit = x.Decode(o.size)
 		case *fs.HashesOption:
-			if x.Hashes.Count() > 0 {
-				hasher, err = hash.NewMultiHasherTypes(x.Hashes)
-				if err != nil {
-					return nil, err
-				}
-			}
+			hashes = x.Hashes
 		default:
 			if option.Mandatory() {
 				fs.Logf(o, "Unsupported mandatory option: %v", option)
@@ -890,31 +757,26 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		}
 	}
 
-	// Handle a translated link
-	if o.translatedLink {
-		return o.openTranslatedLink(offset, limit)
-	}
-
-	fd, err := file.Open(o.path)
+	fd, err := os.Open(o.path)
 	if err != nil {
 		return
 	}
-	wrappedFd := readers.NewLimitedReadCloser(newFadviseReadCloser(o, fd, offset, limit), limit)
+	wrappedFd := readers.NewLimitedReadCloser(fd, limit)
 	if offset != 0 {
 		// seek the object
 		_, err = fd.Seek(offset, io.SeekStart)
 		// don't attempt to make checksums
 		return wrappedFd, err
 	}
-	if hasher == nil {
-		// no need to wrap since we don't need checksums
-		return wrappedFd, nil
+	hash, err := hash.NewMultiHasherTypes(hashes)
+	if err != nil {
+		return nil, err
 	}
-	// Update the hashes as we go along
+	// Update the md5sum as we go along
 	in = &localOpenFile{
 		o:    o,
 		in:   wrappedFd,
-		hash: hasher,
+		hash: hash,
 		fd:   fd,
 	}
 	return in, nil
@@ -922,100 +784,42 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // mkdirAll makes all the directories needed to store the object
 func (o *Object) mkdirAll() error {
-	dir := filepath.Dir(o.path)
+	dir, _ := getDirFile(o.path)
 	return os.MkdirAll(dir, 0777)
 }
 
-type nopWriterCloser struct {
-	*bytes.Buffer
-}
-
-func (nwc nopWriterCloser) Close() error {
-	// noop
-	return nil
-}
-
 // Update the object from in with modTime and size
-func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
-	var out io.WriteCloser
-	var hasher *hash.MultiHasher
-
+func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	hashes := hash.Supported
 	for _, option := range options {
 		switch x := option.(type) {
 		case *fs.HashesOption:
-			if x.Hashes.Count() > 0 {
-				hasher, err = hash.NewMultiHasherTypes(x.Hashes)
-				if err != nil {
-					return err
-				}
-			}
+			hashes = x.Hashes
 		}
 	}
 
-	err = o.mkdirAll()
+	err := o.mkdirAll()
 	if err != nil {
 		return err
 	}
 
-	var symlinkData bytes.Buffer
-	// If the object is a regular file, create it.
-	// If it is a translated link, just read in the contents, and
-	// then create a symlink
-	if !o.translatedLink {
-		f, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
-		if err != nil {
-			if runtime.GOOS == "windows" && os.IsPermission(err) {
-				// If permission denied on Windows might be trying to update a
-				// hidden file, in which case try opening without CREATE
-				// See: https://stackoverflow.com/questions/13215716/ioerror-errno-13-permission-denied-when-trying-to-open-hidden-file-in-w-mod
-				f, err = file.OpenFile(o.path, os.O_WRONLY|os.O_TRUNC, 0666)
-				if err != nil {
-					return err
-				}
-			} else {
-				return err
-			}
-		}
-		// Pre-allocate the file for performance reasons
-		err = preAllocate(src.Size(), f)
-		if err != nil {
-			fs.Debugf(o, "Failed to pre-allocate: %v", err)
-		}
-		out = f
-	} else {
-		out = nopWriterCloser{&symlinkData}
+	out, err := os.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	if err != nil {
+		return err
 	}
 
 	// Calculate the hash of the object we are reading as we go along
-	if hasher != nil {
-		in = io.TeeReader(in, hasher)
+	hash, err := hash.NewMultiHasherTypes(hashes)
+	if err != nil {
+		return err
 	}
+	in = io.TeeReader(in, hash)
 
 	_, err = io.Copy(out, in)
 	closeErr := out.Close()
 	if err == nil {
 		err = closeErr
 	}
-
-	if o.translatedLink {
-		if err == nil {
-			// Remove any current symlink or file, if one exists
-			if _, err := os.Lstat(o.path); err == nil {
-				if removeErr := os.Remove(o.path); removeErr != nil {
-					fs.Errorf(o, "Failed to remove previous file: %v", removeErr)
-					return removeErr
-				}
-			}
-			// Use the contents for the copied object to create a symlink
-			err = os.Symlink(symlinkData.String(), o.path)
-		}
-
-		// only continue if symlink creation succeeded
-		if err != nil {
-			return err
-		}
-	}
-
 	if err != nil {
 		fs.Logf(o, "Removing partially written file on error: %v", err)
 		if removeErr := os.Remove(o.path); removeErr != nil {
@@ -1025,50 +829,18 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	// All successful so update the hashes
-	if hasher != nil {
-		o.fs.objectHashesMu.Lock()
-		o.hashes = hasher.Sums()
-		o.fs.objectHashesMu.Unlock()
-	}
+	o.fs.objectHashesMu.Lock()
+	o.hashes = hash.Sums()
+	o.fs.objectHashesMu.Unlock()
 
 	// Set the mtime
-	err = o.SetModTime(ctx, src.ModTime(ctx))
+	err = o.SetModTime(src.ModTime())
 	if err != nil {
 		return err
 	}
 
 	// ReRead info now that we have finished
 	return o.lstat()
-}
-
-// OpenWriterAt opens with a handle for random access writes
-//
-// Pass in the remote desired and the size if known.
-//
-// It truncates any existing object
-func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.WriterAtCloser, error) {
-	// Temporary Object under construction
-	o := f.newObject(remote)
-
-	err := o.mkdirAll()
-	if err != nil {
-		return nil, err
-	}
-
-	if o.translatedLink {
-		return nil, errors.New("can't open a symlink for random writing")
-	}
-
-	out, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
-	if err != nil {
-		return nil, err
-	}
-	// Pre-allocate the file for performance reasons
-	err = preAllocate(size, out)
-	if err != nil {
-		fs.Debugf(o, "Failed to pre-allocate: %v", err)
-	}
-	return out, nil
 }
 
 // setMetadata sets the file info from the os.FileInfo passed in
@@ -1096,11 +868,44 @@ func (o *Object) lstat() error {
 }
 
 // Remove an object
-func (o *Object) Remove(ctx context.Context) error {
+func (o *Object) Remove() error {
 	return remove(o.path)
 }
 
-func cleanRootPath(s string, noUNC bool, enc encoder.MultiEncoder) string {
+// Return the directory and file from an OS path. Assumes
+// os.PathSeparator is used.
+func getDirFile(s string) (string, string) {
+	i := strings.LastIndex(s, string(os.PathSeparator))
+	dir, file := s[:i], s[i+1:]
+	if dir == "" {
+		dir = string(os.PathSeparator)
+	}
+	return dir, file
+}
+
+// cleanPathFragment cleans an OS path fragment which is part of a
+// bigger path and not necessarily absolute
+func cleanPathFragment(s string) string {
+	if s == "" {
+		return s
+	}
+	s = filepath.Clean(s)
+	if runtime.GOOS == "windows" {
+		s = strings.Replace(s, `/`, `\`, -1)
+	}
+	return s
+}
+
+// cleanPath cleans and makes absolute the path passed in and returns
+// an OS path.
+//
+// The input might be in OS form or rclone form or a mixture, but the
+// output is in OS form.
+//
+// On windows it makes the path UNC also and replaces any characters
+// Windows can't deal with with their replacements.
+func (f *Fs) cleanPath(s string) string {
+	s = cleanPathFragment(s)
 	if runtime.GOOS == "windows" {
 		if !filepath.IsAbs(s) && !strings.HasPrefix(s, "\\") {
 			s2, err := filepath.Abs(s)
@@ -1108,24 +913,19 @@ func cleanRootPath(s string, noUNC bool, enc encoder.MultiEncoder) string {
 				s = s2
 			}
 		}
-		s = filepath.ToSlash(s)
-		vol := filepath.VolumeName(s)
-		s = vol + enc.FromStandardPath(s[len(vol):])
-		s = filepath.FromSlash(s)
-
-		if !noUNC {
+		if !f.opt.NoUNC {
 			// Convert to UNC
 			s = uncPath(s)
 		}
-		return s
-	}
-	if !filepath.IsAbs(s) {
-		s2, err := filepath.Abs(s)
-		if err == nil {
-			s = s2
+		s = cleanWindowsName(f, s)
+	} else {
+		if !filepath.IsAbs(s) {
+			s2, err := filepath.Abs(s)
+			if err == nil {
+				s = s2
+			}
 		}
 	}
-	s = enc.FromStandardPath(s)
 	return s
 }
 
@@ -1134,30 +934,71 @@ var isAbsWinDrive = regexp.MustCompile(`^[a-zA-Z]\:\\`)
 
 // uncPath converts an absolute Windows path
 // to a UNC long path.
-func uncPath(l string) string {
+func uncPath(s string) string {
+	// UNC can NOT use "/", so convert all to "\"
+	s = strings.Replace(s, `/`, `\`, -1)
+
 	// If prefix is "\\", we already have a UNC path or server.
-	if strings.HasPrefix(l, `\\`) {
+	if strings.HasPrefix(s, `\\`) {
 		// If already long path, just keep it
-		if strings.HasPrefix(l, `\\?\`) {
-			return l
+		if strings.HasPrefix(s, `\\?\`) {
+			return s
 		}
 
 		// Trim "\\" from path and add UNC prefix.
-		return `\\?\UNC\` + strings.TrimPrefix(l, `\\`)
+		return `\\?\UNC\` + strings.TrimPrefix(s, `\\`)
 	}
-	if isAbsWinDrive.MatchString(l) {
-		return `\\?\` + l
+	if isAbsWinDrive.MatchString(s) {
+		return `\\?\` + s
 	}
-	return l
+	return s
+}
+
+// cleanWindowsName will clean invalid Windows characters replacing them with _
+func cleanWindowsName(f *Fs, name string) string {
+	original := name
+	var name2 string
+	if strings.HasPrefix(name, `\\?\`) {
+		name2 = `\\?\`
+		name = strings.TrimPrefix(name, `\\?\`)
+	}
+	if strings.HasPrefix(name, `//?/`) {
+		name2 = `//?/`
+		name = strings.TrimPrefix(name, `//?/`)
+	}
+	// Colon is allowed as part of a drive name X:\
+	colonAt := strings.Index(name, ":")
+	if colonAt > 0 && colonAt < 3 && len(name) > colonAt+1 {
+		// Copy to name2, which is unfiltered
+		name2 += name[0 : colonAt+1]
+		name = name[colonAt+1:]
+	}
+
+	name2 += strings.Map(func(r rune) rune {
+		switch r {
+		case '<', '>', '"', '|', '?', '*', ':':
+			return '_'
+		}
+		return r
+	}, name)
+
+	if name2 != original && f != nil {
+		f.wmu.Lock()
+		if _, ok := f.warned[name]; !ok {
+			fs.Logf(f, "Replacing invalid characters in %q to %q", name, name2)
+			f.warned[name] = struct{}{}
+		}
+		f.wmu.Unlock()
+	}
+	return name2
 }
 
 // Check the interfaces are satisfied
 var (
-	_ fs.Fs             = &Fs{}
-	_ fs.Purger         = &Fs{}
-	_ fs.PutStreamer    = &Fs{}
-	_ fs.Mover          = &Fs{}
-	_ fs.DirMover       = &Fs{}
-	_ fs.OpenWriterAter = &Fs{}
-	_ fs.Object         = &Object{}
+	_ fs.Fs          = &Fs{}
+	_ fs.Purger      = &Fs{}
+	_ fs.PutStreamer = &Fs{}
+	_ fs.Mover       = &Fs{}
+	_ fs.DirMover    = &Fs{}
+	_ fs.Object      = &Object{}
 )

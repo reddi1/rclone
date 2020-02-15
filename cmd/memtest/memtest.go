@@ -1,21 +1,20 @@
 package memtest
 
 import (
-	"context"
 	"runtime"
 	"sync"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:    "memtest remote:path",
 	Short:  `Load all the objects at remote:path and report memory stats.`,
 	Hidden: true,
@@ -23,8 +22,7 @@ var commandDefinition = &cobra.Command{
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {
-			ctx := context.Background()
-			objects, _, err := operations.Count(ctx, fsrc)
+			objects, _, err := operations.Count(fsrc)
 			if err != nil {
 				return err
 			}
@@ -33,7 +31,7 @@ var commandDefinition = &cobra.Command{
 			runtime.GC()
 			runtime.ReadMemStats(&before)
 			var mu sync.Mutex
-			err = operations.ListFn(ctx, fsrc, func(o fs.Object) {
+			err = operations.ListFn(fsrc, func(o fs.Object) {
 				mu.Lock()
 				objs = append(objs, o)
 				mu.Unlock()

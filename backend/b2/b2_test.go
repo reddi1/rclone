@@ -1,34 +1,17 @@
 // Test B2 filesystem interface
-package b2
+package b2_test
 
 import (
 	"testing"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fstest/fstests"
+	"github.com/ncw/rclone/backend/b2"
+	"github.com/ncw/rclone/fstest/fstests"
 )
 
 // TestIntegration runs integration tests against the remote
 func TestIntegration(t *testing.T) {
 	fstests.Run(t, &fstests.Opt{
 		RemoteName: "TestB2:",
-		NilObject:  (*Object)(nil),
-		ChunkedUpload: fstests.ChunkedUploadConfig{
-			MinChunkSize:       minChunkSize,
-			NeedMultipleChunks: true,
-		},
+		NilObject:  (*b2.Object)(nil),
 	})
 }
-
-func (f *Fs) SetUploadChunkSize(cs fs.SizeSuffix) (fs.SizeSuffix, error) {
-	return f.setUploadChunkSize(cs)
-}
-
-func (f *Fs) SetUploadCutoff(cs fs.SizeSuffix) (fs.SizeSuffix, error) {
-	return f.setUploadCutoff(cs)
-}
-
-var (
-	_ fstests.SetUploadChunkSizer = (*Fs)(nil)
-	_ fstests.SetUploadCutoffer   = (*Fs)(nil)
-)

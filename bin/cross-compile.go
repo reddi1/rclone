@@ -63,9 +63,7 @@ var osarches = []string{
 
 // Special environment flags for a given arch
 var archFlags = map[string][]string{
-	"386":    {"GO386=387"},
-	"mips":   {"GOMIPS=softfloat"},
-	"mipsle": {"GOMIPS=softfloat"},
+	"386": {"GO386=387"},
 }
 
 // runEnv - run a shell command with env
@@ -181,7 +179,7 @@ func compileArch(version, goos, goarch, dir string) bool {
 	}
 	args := []string{
 		"go", "build",
-		"--ldflags", "-s -X github.com/rclone/rclone/fs.Version=" + version,
+		"--ldflags", "-s -X github.com/ncw/rclone/fs.Version=" + version,
 		"-i",
 		"-o", output,
 		"-tags", *tags,

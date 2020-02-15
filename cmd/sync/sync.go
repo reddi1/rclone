@@ -1,26 +1,16 @@
 package sync
 
 import (
-	"context"
-
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/operations"
-	"github.com/rclone/rclone/fs/sync"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/sync"
 	"github.com/spf13/cobra"
 )
 
-var (
-	createEmptySrcDirs = false
-)
-
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
-	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after sync")
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "sync source:path dest:path",
 	Short: `Make source and dest identical, modifying destination only.`,
 	Long: `
@@ -42,17 +32,12 @@ extended explanation in the ` + "`" + `copy` + "`" + ` command above if unsure.
 
 If dest:path doesn't exist, it is created and the source:path contents
 go there.
-
-**Note**: Use the ` + "`-P`" + `/` + "`--progress`" + ` flag to view real-time transfer statistics
 `,
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 2, command, args)
-		fsrc, srcFileName, fdst := cmd.NewFsSrcFileDst(args)
+		fsrc, fdst := cmd.NewFsSrcDst(args)
 		cmd.Run(true, true, command, func() error {
-			if srcFileName == "" {
-				return sync.Sync(context.Background(), fdst, fsrc, createEmptySrcDirs)
-			}
-			return operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
+			return sync.Sync(fdst, fsrc)
 		})
 	},
 }

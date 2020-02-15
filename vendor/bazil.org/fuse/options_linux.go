@@ -23,7 +23,3 @@ func noAppleDouble(conf *mountConfig) error {
 func exclCreate(conf *mountConfig) error {
 	return nil
 }
-
-func noBrowse(conf *mountConfig) error {
-	return nil
-}

@@ -10,13 +10,8 @@ package box
 // FIXME box can copy a directory
 
 import (
-	"context"
-	"crypto/rsa"
-	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -25,27 +20,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rclone/rclone/lib/encoder"
-	"github.com/rclone/rclone/lib/jwtutil"
-
-	"github.com/youmark/pkcs8"
-
+	"github.com/ncw/rclone/backend/box/api"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/config"
+	"github.com/ncw/rclone/fs/config/configmap"
+	"github.com/ncw/rclone/fs/config/configstruct"
+	"github.com/ncw/rclone/fs/config/obscure"
+	"github.com/ncw/rclone/fs/fserrors"
+	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/lib/dircache"
+	"github.com/ncw/rclone/lib/oauthutil"
+	"github.com/ncw/rclone/lib/pacer"
+	"github.com/ncw/rclone/lib/rest"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/backend/box/api"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/config/configmap"
-	"github.com/rclone/rclone/fs/config/configstruct"
-	"github.com/rclone/rclone/fs/config/obscure"
-	"github.com/rclone/rclone/fs/fserrors"
-	"github.com/rclone/rclone/fs/fshttp"
-	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/lib/dircache"
-	"github.com/rclone/rclone/lib/oauthutil"
-	"github.com/rclone/rclone/lib/pacer"
-	"github.com/rclone/rclone/lib/rest"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/jws"
 )
 
 const (
@@ -60,7 +48,6 @@ const (
 	listChunks                  = 1000     // chunk size to read directory listings
 	minUploadCutoff             = 50000000 // upload cutoff can be no lower than this
 	defaultUploadCutoff         = 50 * 1024 * 1024
-	tokenURL                    = "https://api.box.com/oauth2/token"
 )
 
 // Globals
@@ -85,34 +72,9 @@ func init() {
 		Description: "Box",
 		NewFs:       NewFs,
 		Config: func(name string, m configmap.Mapper) {
-			jsonFile, ok := m.Get("box_config_file")
-			boxSubType, boxSubTypeOk := m.Get("box_sub_type")
-			var err error
-			if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
-				boxConfig, err := getBoxConfig(jsonFile)
-				if err != nil {
-					log.Fatalf("Failed to configure token: %v", err)
-				}
-				privateKey, err := getDecryptedPrivateKey(boxConfig)
-				if err != nil {
-					log.Fatalf("Failed to configure token: %v", err)
-				}
-				claims, err := getClaims(boxConfig, boxSubType)
-				if err != nil {
-					log.Fatalf("Failed to configure token: %v", err)
-				}
-				signingHeaders := getSigningHeaders(boxConfig)
-				queryParams := getQueryParams(boxConfig)
-				client := fshttp.NewClient(fs.Config)
-				err = jwtutil.Config("box", name, claims, signingHeaders, queryParams, privateKey, m, client)
-				if err != nil {
-					log.Fatalf("Failed to configure token with jwt authentication: %v", err)
-				}
-			} else {
-				err = oauthutil.Config("box", name, m, oauthConfig)
-				if err != nil {
-					log.Fatalf("Failed to configure token with oauth authentication: %v", err)
-				}
+			err := oauthutil.Config("box", name, m, oauthConfig)
+			if err != nil {
+				log.Fatalf("Failed to configure token: %v", err)
 			}
 		},
 		Options: []fs.Option{{
@@ -122,120 +84,17 @@ func init() {
 			Name: config.ConfigClientSecret,
 			Help: "Box App Client Secret\nLeave blank normally.",
 		}, {
-			Name: "box_config_file",
-			Help: "Box App config.json location\nLeave blank normally.",
-		}, {
-			Name:    "box_sub_type",
-			Default: "user",
-			Examples: []fs.OptionExample{{
-				Value: "user",
-				Help:  "Rclone should act on behalf of a user",
-			}, {
-				Value: "enterprise",
-				Help:  "Rclone should act on behalf of a service account",
-			}},
-		}, {
 			Name:     "upload_cutoff",
-			Help:     "Cutoff for switching to multipart upload (>= 50MB).",
+			Help:     "Cutoff for switching to multipart upload.",
 			Default:  fs.SizeSuffix(defaultUploadCutoff),
 			Advanced: true,
-		}, {
-			Name:     "commit_retries",
-			Help:     "Max number of times to try committing a multipart file.",
-			Default:  100,
-			Advanced: true,
-		}, {
-			Name:     config.ConfigEncoding,
-			Help:     config.ConfigEncodingHelp,
-			Advanced: true,
-			// From https://developer.box.com/docs/error-codes#section-400-bad-request :
-			// > Box only supports file or folder names that are 255 characters or less.
-			// > File names containing non-printable ascii, "/" or "\", names with leading
-			// > or trailing spaces, and the special names “.” and “..” are also unsupported.
-			//
-			// Testing revealed names with leading spaces work fine.
-			// Also encode invalid UTF-8 bytes as json doesn't handle them properly.
-			Default: (encoder.Display |
-				encoder.EncodeBackSlash |
-				encoder.EncodeRightSpace |
-				encoder.EncodeInvalidUtf8),
 		}},
 	})
 }
 
-func getBoxConfig(configFile string) (boxConfig *api.ConfigJSON, err error) {
-	file, err := ioutil.ReadFile(configFile)
-	if err != nil {
-		return nil, errors.Wrap(err, "box: failed to read Box config")
-	}
-	err = json.Unmarshal(file, &boxConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "box: failed to parse Box config")
-	}
-	return boxConfig, nil
-}
-
-func getClaims(boxConfig *api.ConfigJSON, boxSubType string) (claims *jws.ClaimSet, err error) {
-	val, err := jwtutil.RandomHex(20)
-	if err != nil {
-		return nil, errors.Wrap(err, "box: failed to generate random string for jti")
-	}
-
-	claims = &jws.ClaimSet{
-		Iss: boxConfig.BoxAppSettings.ClientID,
-		Sub: boxConfig.EnterpriseID,
-		Aud: tokenURL,
-		Iat: time.Now().Unix(),
-		Exp: time.Now().Add(time.Second * 45).Unix(),
-		PrivateClaims: map[string]interface{}{
-			"box_sub_type": boxSubType,
-			"aud":          tokenURL,
-			"jti":          val,
-		},
-	}
-
-	return claims, nil
-}
-
-func getSigningHeaders(boxConfig *api.ConfigJSON) *jws.Header {
-	signingHeaders := &jws.Header{
-		Algorithm: "RS256",
-		Typ:       "JWT",
-		KeyID:     boxConfig.BoxAppSettings.AppAuth.PublicKeyID,
-	}
-
-	return signingHeaders
-}
-
-func getQueryParams(boxConfig *api.ConfigJSON) map[string]string {
-	queryParams := map[string]string{
-		"client_id":     boxConfig.BoxAppSettings.ClientID,
-		"client_secret": boxConfig.BoxAppSettings.ClientSecret,
-	}
-
-	return queryParams
-}
-
-func getDecryptedPrivateKey(boxConfig *api.ConfigJSON) (key *rsa.PrivateKey, err error) {
-
-	block, rest := pem.Decode([]byte(boxConfig.BoxAppSettings.AppAuth.PrivateKey))
-	if len(rest) > 0 {
-		return nil, errors.Wrap(err, "box: extra data included in private key")
-	}
-
-	rsaKey, err := pkcs8.ParsePKCS8PrivateKey(block.Bytes, []byte(boxConfig.BoxAppSettings.AppAuth.Passphrase))
-	if err != nil {
-		return nil, errors.Wrap(err, "box: failed to decrypt private key")
-	}
-
-	return rsaKey.(*rsa.PrivateKey), nil
-}
-
 // Options defines the configuration for this backend
 type Options struct {
-	UploadCutoff  fs.SizeSuffix        `config:"upload_cutoff"`
-	CommitRetries int                  `config:"commit_retries"`
-	Enc           encoder.MultiEncoder `config:"encoding"`
+	UploadCutoff fs.SizeSuffix `config:"upload_cutoff"`
 }
 
 // Fs represents a remote box
@@ -246,7 +105,7 @@ type Fs struct {
 	features     *fs.Features          // optional features
 	srv          *rest.Client          // the connection to the one drive server
 	dirCache     *dircache.DirCache    // Map of directory path to directory id
-	pacer        *fs.Pacer             // pacer for API calls
+	pacer        *pacer.Pacer          // pacer for API calls
 	tokenRenewer *oauthutil.Renew      // renew the token on expiry
 	uploadToken  *pacer.TokenDispenser // control concurrency
 }
@@ -261,7 +120,6 @@ type Object struct {
 	size        int64     // size of the object
 	modTime     time.Time // modification time of the object
 	id          string    // ID of the object
-	publicLink  string    // Public Link for the object
 	sha1        string    // SHA-1 of the object content
 }
 
@@ -306,19 +164,31 @@ var retryErrorCodes = []int{
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
 func shouldRetry(resp *http.Response, err error) (bool, error) {
-	authRetry := false
+	authRety := false
 
 	if resp != nil && resp.StatusCode == 401 && len(resp.Header["Www-Authenticate"]) == 1 && strings.Index(resp.Header["Www-Authenticate"][0], "expired_token") >= 0 {
-		authRetry = true
+		authRety = true
 		fs.Debugf(nil, "Should retry: %v", err)
 	}
-	return authRetry || fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
+	return authRety || fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
+}
+
+// substitute reserved characters for box
+func replaceReservedChars(x string) string {
+	// Backslash for FULLWIDTH REVERSE SOLIDUS
+	return strings.Replace(x, "\\", "＼", -1)
+}
+
+// restore reserved characters for box
+func restoreReservedChars(x string) string {
+	// FULLWIDTH REVERSE SOLIDUS for Backslash
+	return strings.Replace(x, "＼", "\\", -1)
 }
 
 // readMetaDataForPath reads the metadata from the path
-func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.Item, err error) {
+func (f *Fs) readMetaDataForPath(path string) (info *api.Item, err error) {
 	// defer fs.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
-	leaf, directoryID, err := f.dirCache.FindRootAndPath(ctx, path, false)
+	leaf, directoryID, err := f.dirCache.FindRootAndPath(path, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
 			return nil, fs.ErrorObjectNotFound
@@ -326,7 +196,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.It
 		return nil, err
 	}
 
-	found, err := f.listAll(ctx, directoryID, false, true, func(item *api.Item) bool {
+	found, err := f.listAll(directoryID, false, true, func(item *api.Item) bool {
 		if item.Name == leaf {
 			info = item
 			return true
@@ -361,7 +231,6 @@ func errorHandler(resp *http.Response) error {
 
 // NewFs constructs an Fs from the path, container:path
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
-	ctx := context.Background()
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
@@ -376,7 +245,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	root = parsePath(root)
 	oAuthClient, ts, err := oauthutil.NewClient(name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure Box")
+		log.Fatalf("Failed to configure Box: %v", err)
 	}
 
 	f := &Fs{
@@ -384,7 +253,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		root:        root,
 		opt:         *opt,
 		srv:         rest.NewClient(oAuthClient).SetRoot(rootURL),
-		pacer:       fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		pacer:       pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant),
 		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
 	}
 	f.features = (&fs.Features{
@@ -395,7 +264,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 
 	// Renew the token in the background
 	f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-		_, err := f.readMetaDataForPath(ctx, "")
+		_, err := f.readMetaDataForPath("")
 		return err
 	})
 
@@ -403,20 +272,20 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	f.dirCache = dircache.New(root, rootID, f)
 
 	// Find the current root
-	err = f.dirCache.FindRoot(ctx, false)
+	err = f.dirCache.FindRoot(false)
 	if err != nil {
 		// Assume it is a file
 		newRoot, remote := dircache.SplitPath(root)
-		tempF := *f
-		tempF.dirCache = dircache.New(newRoot, rootID, &tempF)
-		tempF.root = newRoot
+		newF := *f
+		newF.dirCache = dircache.New(newRoot, rootID, &newF)
+		newF.root = newRoot
 		// Make new Fs which is the parent
-		err = tempF.dirCache.FindRoot(ctx, false)
+		err = newF.dirCache.FindRoot(false)
 		if err != nil {
 			// No root so return old f
 			return f, nil
 		}
-		_, err := tempF.newObjectWithInfo(ctx, remote, nil)
+		_, err := newF.newObjectWithInfo(remote, nil)
 		if err != nil {
 			if err == fs.ErrorObjectNotFound {
 				// File doesn't exist so return old f
@@ -424,14 +293,8 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 			}
 			return nil, err
 		}
-		f.features.Fill(&tempF)
-		// XXX: update the old f here instead of returning tempF, since
-		// `features` were already filled with functions having *f as a receiver.
-		// See https://github.com/rclone/rclone/issues/2182
-		f.dirCache = tempF.dirCache
-		f.root = tempF.root
 		// return an error with an fs which points to the parent
-		return f, fs.ErrorIsFile
+		return &newF, fs.ErrorIsFile
 	}
 	return f, nil
 }
@@ -447,7 +310,7 @@ func (f *Fs) rootSlash() string {
 // Return an Object from a path
 //
 // If it can't be found it returns the error fs.ErrorObjectNotFound.
-func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Item) (fs.Object, error) {
+func (f *Fs) newObjectWithInfo(remote string, info *api.Item) (fs.Object, error) {
 	o := &Object{
 		fs:     f,
 		remote: remote,
@@ -457,7 +320,7 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Ite
 		// Set info
 		err = o.setMetaData(info)
 	} else {
-		err = o.readMetaData(ctx) // reads info and meta, returning an error
+		err = o.readMetaData() // reads info and meta, returning an error
 	}
 	if err != nil {
 		return nil, err
@@ -467,14 +330,14 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Ite
 
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error fs.ErrorObjectNotFound.
-func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	return f.newObjectWithInfo(ctx, remote, nil)
+func (f *Fs) NewObject(remote string) (fs.Object, error) {
+	return f.newObjectWithInfo(remote, nil)
 }
 
 // FindLeaf finds a directory of name leaf in the folder with ID pathID
-func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut string, found bool, err error) {
+func (f *Fs) FindLeaf(pathID, leaf string) (pathIDOut string, found bool, err error) {
 	// Find the leaf in pathID
-	found, err = f.listAll(ctx, pathID, true, false, func(item *api.Item) bool {
+	found, err = f.listAll(pathID, true, false, func(item *api.Item) bool {
 		if item.Name == leaf {
 			pathIDOut = item.ID
 			return true
@@ -492,7 +355,7 @@ func fieldsValue() url.Values {
 }
 
 // CreateDir makes a directory with pathID as parent and name leaf
-func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, err error) {
+func (f *Fs) CreateDir(pathID, leaf string) (newID string, err error) {
 	// fs.Debugf(f, "CreateDir(%q, %q)\n", pathID, leaf)
 	var resp *http.Response
 	var info *api.Item
@@ -502,13 +365,13 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		Parameters: fieldsValue(),
 	}
 	mkdir := api.CreateFolder{
-		Name: f.opt.Enc.FromStandardName(leaf),
+		Name: replaceReservedChars(leaf),
 		Parent: api.Parent{
 			ID: pathID,
 		},
 	}
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &mkdir, &info)
+		resp, err = f.srv.CallJSON(&opts, &mkdir, &info)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -530,7 +393,7 @@ type listAllFn func(*api.Item) bool
 // Lists the directory required calling the user function on each item found
 //
 // If the user fn ever returns true then it early exits with found = true
-func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, filesOnly bool, fn listAllFn) (found bool, err error) {
+func (f *Fs) listAll(dirID string, directoriesOnly bool, filesOnly bool, fn listAllFn) (found bool, err error) {
 	opts := rest.Opts{
 		Method:     "GET",
 		Path:       "/folders/" + dirID + "/items",
@@ -545,7 +408,7 @@ OUTER:
 		var result api.FolderItems
 		var resp *http.Response
 		err = f.pacer.Call(func() (bool, error) {
-			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+			resp, err = f.srv.CallJSON(&opts, nil, &result)
 			return shouldRetry(resp, err)
 		})
 		if err != nil {
@@ -568,7 +431,7 @@ OUTER:
 			if item.ItemStatus != api.ItemStatusActive {
 				continue
 			}
-			item.Name = f.opt.Enc.ToStandardName(item.Name)
+			item.Name = restoreReservedChars(item.Name)
 			if fn(item) {
 				found = true
 				break OUTER
@@ -591,17 +454,17 @@ OUTER:
 //
 // This should return ErrDirNotFound if the directory isn't
 // found.
-func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	err = f.dirCache.FindRoot(ctx, false)
+func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
+	err = f.dirCache.FindRoot(false)
 	if err != nil {
 		return nil, err
 	}
-	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
+	directoryID, err := f.dirCache.FindDir(dir, false)
 	if err != nil {
 		return nil, err
 	}
 	var iErr error
-	_, err = f.listAll(ctx, directoryID, false, false, func(info *api.Item) bool {
+	_, err = f.listAll(directoryID, false, false, func(info *api.Item) bool {
 		remote := path.Join(dir, info.Name)
 		if info.Type == api.ItemTypeFolder {
 			// cache the directory ID for later lookups
@@ -610,7 +473,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			// FIXME more info from dir?
 			entries = append(entries, d)
 		} else if info.Type == api.ItemTypeFile {
-			o, err := f.newObjectWithInfo(ctx, remote, info)
+			o, err := f.newObjectWithInfo(remote, info)
 			if err != nil {
 				iErr = err
 				return true
@@ -634,9 +497,9 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Returns the object, leaf, directoryID and error
 //
 // Used to create new objects
-func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
+func (f *Fs) createObject(remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
 	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err = f.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err = f.dirCache.FindRootAndPath(remote, true)
 	if err != nil {
 		return
 	}
@@ -653,22 +516,22 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 // Copy the reader in to the new object which is returned
 //
 // The new object may have been created if an error is returned
-func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	existingObj, err := f.newObjectWithInfo(ctx, src.Remote(), nil)
+func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	exisitingObj, err := f.newObjectWithInfo(src.Remote(), nil)
 	switch err {
 	case nil:
-		return existingObj, existingObj.Update(ctx, in, src, options...)
+		return exisitingObj, exisitingObj.Update(in, src, options...)
 	case fs.ErrorObjectNotFound:
 		// Not found so create it
-		return f.PutUnchecked(ctx, in, src)
+		return f.PutUnchecked(in, src)
 	default:
 		return nil, err
 	}
 }
 
 // PutStream uploads to the remote path with the modTime given of indeterminate size
-func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return f.Put(ctx, in, src, options...)
+func (f *Fs) PutStream(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	return f.Put(in, src, options...)
 }
 
 // PutUnchecked the object into the container
@@ -678,56 +541,56 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 // Copy the reader in to the new object which is returned
 //
 // The new object may have been created if an error is returned
-func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+func (f *Fs) PutUnchecked(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	remote := src.Remote()
 	size := src.Size()
-	modTime := src.ModTime(ctx)
+	modTime := src.ModTime()
 
-	o, _, _, err := f.createObject(ctx, remote, modTime, size)
+	o, _, _, err := f.createObject(remote, modTime, size)
 	if err != nil {
 		return nil, err
 	}
-	return o, o.Update(ctx, in, src, options...)
+	return o, o.Update(in, src, options...)
 }
 
 // Mkdir creates the container if it doesn't exist
-func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	err := f.dirCache.FindRoot(ctx, true)
+func (f *Fs) Mkdir(dir string) error {
+	err := f.dirCache.FindRoot(true)
 	if err != nil {
 		return err
 	}
 	if dir != "" {
-		_, err = f.dirCache.FindDir(ctx, dir, true)
+		_, err = f.dirCache.FindDir(dir, true)
 	}
 	return err
 }
 
 // deleteObject removes an object by ID
-func (f *Fs) deleteObject(ctx context.Context, id string) error {
+func (f *Fs) deleteObject(id string) error {
 	opts := rest.Opts{
 		Method:     "DELETE",
 		Path:       "/files/" + id,
 		NoResponse: true,
 	}
 	return f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.Call(ctx, &opts)
+		resp, err := f.srv.Call(&opts)
 		return shouldRetry(resp, err)
 	})
 }
 
 // purgeCheck removes the root directory, if check is set then it
 // refuses to do so if it has anything in
-func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
+func (f *Fs) purgeCheck(dir string, check bool) error {
 	root := path.Join(f.root, dir)
 	if root == "" {
 		return errors.New("can't purge root directory")
 	}
 	dc := f.dirCache
-	err := dc.FindRoot(ctx, false)
+	err := dc.FindRoot(false)
 	if err != nil {
 		return err
 	}
-	rootID, err := dc.FindDir(ctx, dir, false)
+	rootID, err := dc.FindDir(dir, false)
 	if err != nil {
 		return err
 	}
@@ -741,7 +604,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 	opts.Parameters.Set("recursive", strconv.FormatBool(!check))
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.Call(ctx, &opts)
+		resp, err = f.srv.Call(&opts)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -757,8 +620,8 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 // Rmdir deletes the root folder
 //
 // Returns an error if it isn't empty
-func (f *Fs) Rmdir(ctx context.Context, dir string) error {
-	return f.purgeCheck(ctx, dir, true)
+func (f *Fs) Rmdir(dir string) error {
+	return f.purgeCheck(dir, true)
 }
 
 // Precision return the precision of this Fs
@@ -775,13 +638,13 @@ func (f *Fs) Precision() time.Duration {
 // Will only be called if src.Fs().Name() == f.Name()
 //
 // If it isn't possible then return fs.ErrorCantCopy
-func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	srcObj, ok := src.(*Object)
 	if !ok {
 		fs.Debugf(src, "Can't copy - not same remote type")
 		return nil, fs.ErrorCantCopy
 	}
-	err := srcObj.readMetaData(ctx)
+	err := srcObj.readMetaData()
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +656,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 
 	// Create temporary object
-	dstObj, leaf, directoryID, err := f.createObject(ctx, remote, srcObj.modTime, srcObj.size)
+	dstObj, leaf, directoryID, err := f.createObject(remote, srcObj.modTime, srcObj.size)
 	if err != nil {
 		return nil, err
 	}
@@ -804,8 +667,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		Path:       "/files/" + srcObj.id + "/copy",
 		Parameters: fieldsValue(),
 	}
-	copyFile := api.CopyFile{
-		Name: f.opt.Enc.FromStandardName(leaf),
+	replacedLeaf := replaceReservedChars(leaf)
+	copy := api.CopyFile{
+		Name: replacedLeaf,
 		Parent: api.Parent{
 			ID: directoryID,
 		},
@@ -813,7 +677,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	var resp *http.Response
 	var info *api.Item
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &copyFile, &info)
+		resp, err = f.srv.CallJSON(&opts, &copy, &info)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -831,12 +695,12 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purgeCheck(ctx, "", false)
+func (f *Fs) Purge() error {
+	return f.purgeCheck("", false)
 }
 
 // move a file or folder
-func (f *Fs) move(ctx context.Context, endpoint, id, leaf, directoryID string) (info *api.Item, err error) {
+func (f *Fs) move(endpoint, id, leaf, directoryID string) (info *api.Item, err error) {
 	// Move the object
 	opts := rest.Opts{
 		Method:     "PUT",
@@ -844,14 +708,14 @@ func (f *Fs) move(ctx context.Context, endpoint, id, leaf, directoryID string) (
 		Parameters: fieldsValue(),
 	}
 	move := api.UpdateFileMove{
-		Name: f.opt.Enc.FromStandardName(leaf),
+		Name: replaceReservedChars(leaf),
 		Parent: api.Parent{
 			ID: directoryID,
 		},
 	}
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &move, &info)
+		resp, err = f.srv.CallJSON(&opts, &move, &info)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -869,7 +733,7 @@ func (f *Fs) move(ctx context.Context, endpoint, id, leaf, directoryID string) (
 // Will only be called if src.Fs().Name() == f.Name()
 //
 // If it isn't possible then return fs.ErrorCantMove
-func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 	srcObj, ok := src.(*Object)
 	if !ok {
 		fs.Debugf(src, "Can't move - not same remote type")
@@ -877,13 +741,13 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 
 	// Create temporary object
-	dstObj, leaf, directoryID, err := f.createObject(ctx, remote, srcObj.modTime, srcObj.size)
+	dstObj, leaf, directoryID, err := f.createObject(remote, srcObj.modTime, srcObj.size)
 	if err != nil {
 		return nil, err
 	}
 
 	// Do the move
-	info, err := f.move(ctx, "/files/", srcObj.id, leaf, directoryID)
+	info, err := f.move("/files/", srcObj.id, leaf, directoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -903,7 +767,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 // If it isn't possible then return fs.ErrorCantDirMove
 //
 // If destination exists then return fs.ErrorDirExists
-func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
+func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 	srcFs, ok := src.(*Fs)
 	if !ok {
 		fs.Debugf(srcFs, "Can't move directory - not same remote type")
@@ -919,14 +783,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	}
 
 	// find the root src directory
-	err := srcFs.dirCache.FindRoot(ctx, false)
+	err := srcFs.dirCache.FindRoot(false)
 	if err != nil {
 		return err
 	}
 
 	// find the root dst directory
 	if dstRemote != "" {
-		err = f.dirCache.FindRoot(ctx, true)
+		err = f.dirCache.FindRoot(true)
 		if err != nil {
 			return err
 		}
@@ -942,14 +806,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	if dstRemote == "" {
 		findPath = f.root
 	}
-	leaf, directoryID, err = f.dirCache.FindPath(ctx, findPath, true)
+	leaf, directoryID, err = f.dirCache.FindPath(findPath, true)
 	if err != nil {
 		return err
 	}
 
 	// Check destination does not exist
 	if dstRemote != "" {
-		_, err = f.dirCache.FindDir(ctx, dstRemote, false)
+		_, err = f.dirCache.FindDir(dstRemote, false)
 		if err == fs.ErrorDirNotFound {
 			// OK
 		} else if err != nil {
@@ -960,58 +824,18 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	}
 
 	// Find ID of src
-	srcID, err := srcFs.dirCache.FindDir(ctx, srcRemote, false)
+	srcID, err := srcFs.dirCache.FindDir(srcRemote, false)
 	if err != nil {
 		return err
 	}
 
 	// Do the move
-	_, err = f.move(ctx, "/folders/", srcID, leaf, directoryID)
+	_, err = f.move("/folders/", srcID, leaf, directoryID)
 	if err != nil {
 		return err
 	}
 	srcFs.dirCache.FlushDir(srcRemote)
 	return nil
-}
-
-// PublicLink adds a "readable by anyone with link" permission on the given file or folder.
-func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
-	id, err := f.dirCache.FindDir(ctx, remote, false)
-	var opts rest.Opts
-	if err == nil {
-		fs.Debugf(f, "attempting to share directory '%s'", remote)
-
-		opts = rest.Opts{
-			Method:     "PUT",
-			Path:       "/folders/" + id,
-			Parameters: fieldsValue(),
-		}
-	} else {
-		fs.Debugf(f, "attempting to share single file '%s'", remote)
-		o, err := f.NewObject(ctx, remote)
-		if err != nil {
-			return "", err
-		}
-
-		if o.(*Object).publicLink != "" {
-			return o.(*Object).publicLink, nil
-		}
-
-		opts = rest.Opts{
-			Method:     "PUT",
-			Path:       "/files/" + o.(*Object).id,
-			Parameters: fieldsValue(),
-		}
-	}
-
-	shareLink := api.CreateSharedLink{}
-	var info api.Item
-	var resp *http.Response
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &shareLink, &info)
-		return shouldRetry(resp, err)
-	})
-	return info.SharedLink.URL, err
 }
 
 // DirCacheFlush resets the directory cache - used in testing as an
@@ -1045,8 +869,13 @@ func (o *Object) Remote() string {
 	return o.remote
 }
 
+// srvPath returns a path for use in server
+func (o *Object) srvPath() string {
+	return replaceReservedChars(o.fs.rootSlash() + o.remote)
+}
+
 // Hash returns the SHA-1 of an object returning a lowercase hex string
-func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
+func (o *Object) Hash(t hash.Type) (string, error) {
 	if t != hash.SHA1 {
 		return "", hash.ErrUnsupported
 	}
@@ -1055,7 +884,7 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 
 // Size returns the size of an object in bytes
 func (o *Object) Size() int64 {
-	err := o.readMetaData(context.TODO())
+	err := o.readMetaData()
 	if err != nil {
 		fs.Logf(o, "Failed to read metadata: %v", err)
 		return 0
@@ -1073,18 +902,17 @@ func (o *Object) setMetaData(info *api.Item) (err error) {
 	o.sha1 = info.SHA1
 	o.modTime = info.ModTime()
 	o.id = info.ID
-	o.publicLink = info.SharedLink.URL
 	return nil
 }
 
 // readMetaData gets the metadata if it hasn't already been fetched
 //
 // it also sets the info
-func (o *Object) readMetaData(ctx context.Context) (err error) {
+func (o *Object) readMetaData() (err error) {
 	if o.hasMetaData {
 		return nil
 	}
-	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
+	info, err := o.fs.readMetaDataForPath(o.remote)
 	if err != nil {
 		if apiErr, ok := err.(*api.Error); ok {
 			if apiErr.Code == "not_found" || apiErr.Code == "trashed" {
@@ -1101,8 +929,8 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 //
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
-func (o *Object) ModTime(ctx context.Context) time.Time {
-	err := o.readMetaData(ctx)
+func (o *Object) ModTime() time.Time {
+	err := o.readMetaData()
 	if err != nil {
 		fs.Logf(o, "Failed to read metadata: %v", err)
 		return time.Now()
@@ -1111,7 +939,7 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 }
 
 // setModTime sets the modification time of the local fs object
-func (o *Object) setModTime(ctx context.Context, modTime time.Time) (*api.Item, error) {
+func (o *Object) setModTime(modTime time.Time) (*api.Item, error) {
 	opts := rest.Opts{
 		Method:     "PUT",
 		Path:       "/files/" + o.id,
@@ -1122,15 +950,15 @@ func (o *Object) setModTime(ctx context.Context, modTime time.Time) (*api.Item, 
 	}
 	var info *api.Item
 	err := o.fs.pacer.Call(func() (bool, error) {
-		resp, err := o.fs.srv.CallJSON(ctx, &opts, &update, &info)
+		resp, err := o.fs.srv.CallJSON(&opts, &update, &info)
 		return shouldRetry(resp, err)
 	})
 	return info, err
 }
 
 // SetModTime sets the modification time of the local fs object
-func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	info, err := o.setModTime(ctx, modTime)
+func (o *Object) SetModTime(modTime time.Time) error {
+	info, err := o.setModTime(modTime)
 	if err != nil {
 		return err
 	}
@@ -1143,7 +971,7 @@ func (o *Object) Storable() bool {
 }
 
 // Open an object for read
-func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	if o.id == "" {
 		return nil, errors.New("can't download - no id")
 	}
@@ -1155,7 +983,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		Options: options,
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
+		resp, err = o.fs.srv.Call(&opts)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -1167,9 +995,9 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 // upload does a single non-multipart upload
 //
 // This is recommended for less than 50 MB of content
-func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, modTime time.Time) (err error) {
+func (o *Object) upload(in io.Reader, leaf, directoryID string, modTime time.Time) (err error) {
 	upload := api.UploadFile{
-		Name:              o.fs.opt.Enc.FromStandardName(leaf),
+		Name:              replaceReservedChars(leaf),
 		ContentModifiedAt: api.Time(modTime),
 		ContentCreatedAt:  api.Time(modTime),
 		Parent: api.Parent{
@@ -1180,8 +1008,8 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 	var resp *http.Response
 	var result api.FolderItems
 	opts := rest.Opts{
-		Method:                "POST",
-		Body:                  in,
+		Method: "POST",
+		Body:   in,
 		MultipartMetadataName: "attributes",
 		MultipartContentName:  "contents",
 		MultipartFileName:     upload.Name,
@@ -1194,7 +1022,7 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 		opts.Path = "/files/content"
 	}
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, &upload, &result)
+		resp, err = o.fs.srv.CallJSON(&opts, &upload, &result)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -1211,32 +1039,32 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 // If existing is set then it updates the object rather than creating a new one
 //
 // The new object may have been created if an error is returned
-func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
+func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	o.fs.tokenRenewer.Start()
 	defer o.fs.tokenRenewer.Stop()
 
 	size := src.Size()
-	modTime := src.ModTime(ctx)
+	modTime := src.ModTime()
 	remote := o.Remote()
 
 	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err := o.fs.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err := o.fs.dirCache.FindRootAndPath(remote, true)
 	if err != nil {
 		return err
 	}
 
 	// Upload with simple or multipart
 	if size <= int64(o.fs.opt.UploadCutoff) {
-		err = o.upload(ctx, in, leaf, directoryID, modTime)
+		err = o.upload(in, leaf, directoryID, modTime)
 	} else {
-		err = o.uploadMultipart(ctx, in, leaf, directoryID, size, modTime)
+		err = o.uploadMultipart(in, leaf, directoryID, size, modTime)
 	}
 	return err
 }
 
 // Remove an object
-func (o *Object) Remove(ctx context.Context) error {
-	return o.fs.deleteObject(ctx, o.id)
+func (o *Object) Remove() error {
+	return o.fs.deleteObject(o.id)
 }
 
 // ID returns the ID of the Object if known, or "" if not
@@ -1253,7 +1081,6 @@ var (
 	_ fs.Mover           = (*Fs)(nil)
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
-	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

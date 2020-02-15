@@ -3,18 +3,18 @@
 package cache
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"path"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 
+	"path"
+	"runtime"
+	"strings"
+
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/operations"
 )
 
 var uploaderMap = make(map[string]*backgroundWriter)
@@ -41,7 +41,6 @@ func initBackgroundUploader(fs *Fs) (*backgroundWriter, error) {
 
 // Handle is managing the read/write/seek operations on an open handle
 type Handle struct {
-	ctx            context.Context
 	cachedObject   *Object
 	cfs            *Fs
 	memory         *Memory
@@ -50,19 +49,17 @@ type Handle struct {
 	offset         int64
 	seenOffsets    map[int64]bool
 	mu             sync.Mutex
-	workersWg      sync.WaitGroup
 	confirmReading chan bool
-	workers        int
-	maxWorkerID    int
-	UseMemory      bool
-	closed         bool
-	reading        bool
+
+	UseMemory bool
+	workers   []*worker
+	closed    bool
+	reading   bool
 }
 
 // NewObjectHandle returns a new Handle for an existing Object
-func NewObjectHandle(ctx context.Context, o *Object, cfs *Fs) *Handle {
+func NewObjectHandle(o *Object, cfs *Fs) *Handle {
 	r := &Handle{
-		ctx:           ctx,
 		cachedObject:  o,
 		cfs:           cfs,
 		offset:        0,
@@ -98,7 +95,7 @@ func (r *Handle) String() string {
 
 // startReadWorkers will start the worker pool
 func (r *Handle) startReadWorkers() {
-	if r.workers > 0 {
+	if r.hasAtLeastOneWorker() {
 		return
 	}
 	totalWorkers := r.cacheFs().opt.TotalWorkers
@@ -120,27 +117,26 @@ func (r *Handle) startReadWorkers() {
 
 // scaleOutWorkers will increase the worker pool count by the provided amount
 func (r *Handle) scaleWorkers(desired int) {
-	current := r.workers
+	current := len(r.workers)
 	if current == desired {
 		return
 	}
 	if current > desired {
 		// scale in gracefully
-		for r.workers > desired {
+		for i := 0; i < current-desired; i++ {
 			r.preloadQueue <- -1
-			r.workers--
 		}
 	} else {
 		// scale out
-		for r.workers < desired {
+		for i := 0; i < desired-current; i++ {
 			w := &worker{
 				r:  r,
-				id: r.maxWorkerID,
+				ch: r.preloadQueue,
+				id: current + i,
 			}
-			r.workersWg.Add(1)
-			r.workers++
-			r.maxWorkerID++
 			go w.run()
+
+			r.workers = append(r.workers, w)
 		}
 	}
 	// ignore first scale out from 0
@@ -152,7 +148,7 @@ func (r *Handle) scaleWorkers(desired int) {
 func (r *Handle) confirmExternalReading() {
 	// if we have a max value of workers
 	// then we skip this step
-	if r.workers > 1 ||
+	if len(r.workers) > 1 ||
 		!r.cacheFs().plexConnector.isConfigured() {
 		return
 	}
@@ -182,7 +178,7 @@ func (r *Handle) queueOffset(offset int64) {
 			}
 		}
 
-		for i := 0; i < r.workers; i++ {
+		for i := 0; i < len(r.workers); i++ {
 			o := r.preloadOffset + int64(r.cacheFs().opt.ChunkSize)*int64(i)
 			if o < 0 || o >= r.cachedObject.Size() {
 				continue
@@ -195,6 +191,16 @@ func (r *Handle) queueOffset(offset int64) {
 			r.preloadQueue <- o
 		}
 	}
+}
+
+func (r *Handle) hasAtLeastOneWorker() bool {
+	oneWorker := false
+	for i := 0; i < len(r.workers); i++ {
+		if r.workers[i].isRunning() {
+			oneWorker = true
+		}
+	}
+	return oneWorker
 }
 
 // getChunk is called by the FS to retrieve a specific chunk of known start and size from where it can find it
@@ -237,7 +243,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 	// not found in ram or
 	// the worker didn't managed to download the chunk in time so we abort and close the stream
 	if err != nil || len(data) == 0 || !found {
-		if r.workers == 0 {
+		if !r.hasAtLeastOneWorker() {
 			fs.Errorf(r, "out of workers")
 			return nil, io.ErrUnexpectedEOF
 		}
@@ -298,7 +304,14 @@ func (r *Handle) Close() error {
 	close(r.preloadQueue)
 	r.closed = true
 	// wait for workers to complete their jobs before returning
-	r.workersWg.Wait()
+	waitCount := 3
+	for i := 0; i < len(r.workers); i++ {
+		waitIdx := 0
+		for r.workers[i].isRunning() && waitIdx < waitCount {
+			time.Sleep(time.Second)
+			waitIdx++
+		}
+	}
 	r.memory.db.Flush()
 
 	fs.Debugf(r, "cache reader closed %v", r.offset)
@@ -335,9 +348,12 @@ func (r *Handle) Seek(offset int64, whence int) (int64, error) {
 }
 
 type worker struct {
-	r  *Handle
-	rc io.ReadCloser
-	id int
+	r       *Handle
+	ch      <-chan int64
+	rc      io.ReadCloser
+	id      int
+	running bool
+	mu      sync.Mutex
 }
 
 // String is a representation of this worker
@@ -354,7 +370,7 @@ func (w *worker) reader(offset, end int64, closeOpen bool) (io.ReadCloser, error
 	r := w.rc
 	if w.rc == nil {
 		r, err = w.r.cacheFs().openRateLimited(func() (io.ReadCloser, error) {
-			return w.r.cachedObject.Object.Open(w.r.ctx, &fs.RangeOption{Start: offset, End: end - 1})
+			return w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end - 1})
 		})
 		if err != nil {
 			return nil, err
@@ -364,7 +380,7 @@ func (w *worker) reader(offset, end int64, closeOpen bool) (io.ReadCloser, error
 
 	if !closeOpen {
 		if do, ok := r.(fs.RangeSeeker); ok {
-			_, err = do.RangeSeek(w.r.ctx, offset, io.SeekStart, end-offset)
+			_, err = do.RangeSeek(offset, io.SeekStart, end-offset)
 			return r, err
 		} else if do, ok := r.(io.Seeker); ok {
 			_, err = do.Seek(offset, io.SeekStart)
@@ -374,7 +390,7 @@ func (w *worker) reader(offset, end int64, closeOpen bool) (io.ReadCloser, error
 
 	_ = w.rc.Close()
 	return w.r.cacheFs().openRateLimited(func() (io.ReadCloser, error) {
-		r, err = w.r.cachedObject.Object.Open(w.r.ctx, &fs.RangeOption{Start: offset, End: end - 1})
+		r, err = w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end - 1})
 		if err != nil {
 			return nil, err
 		}
@@ -382,19 +398,33 @@ func (w *worker) reader(offset, end int64, closeOpen bool) (io.ReadCloser, error
 	})
 }
 
+func (w *worker) isRunning() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.running
+}
+
+func (w *worker) setRunning(f bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.running = f
+}
+
 // run is the main loop for the worker which receives offsets to preload
 func (w *worker) run() {
 	var err error
 	var data []byte
+	defer w.setRunning(false)
 	defer func() {
 		if w.rc != nil {
 			_ = w.rc.Close()
+			w.setRunning(false)
 		}
-		w.r.workersWg.Done()
 	}()
 
 	for {
-		chunkStart, open := <-w.r.preloadQueue
+		chunkStart, open := <-w.ch
+		w.setRunning(true)
 		if chunkStart < 0 || !open {
 			break
 		}
@@ -452,7 +482,7 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	// we seem to be getting only errors so we abort
 	if err != nil {
 		fs.Errorf(w, "object open failed %v: %v", chunkStart, err)
-		err = w.r.cachedObject.refreshFromSource(w.r.ctx, true)
+		err = w.r.cachedObject.refreshFromSource(true)
 		if err != nil {
 			fs.Errorf(w, "%v", err)
 		}
@@ -465,7 +495,7 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	sourceRead, err = io.ReadFull(w.rc, data)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		fs.Errorf(w, "failed to read chunk %v: %v", chunkStart, err)
-		err = w.r.cachedObject.refreshFromSource(w.r.ctx, true)
+		err = w.r.cachedObject.refreshFromSource(true)
 		if err != nil {
 			fs.Errorf(w, "%v", err)
 		}
@@ -591,7 +621,7 @@ func (b *backgroundWriter) run() {
 		remote := b.fs.cleanRootFromPath(absPath)
 		b.notify(remote, BackgroundUploadStarted, nil)
 		fs.Infof(remote, "background upload: started upload")
-		err = operations.MoveFile(context.TODO(), b.fs.UnWrap(), b.fs.tempFs, remote, remote)
+		err = operations.MoveFile(b.fs.UnWrap(), b.fs.tempFs, remote, remote)
 		if err != nil {
 			b.notify(remote, BackgroundUploadError, err)
 			_ = b.fs.cache.rollbackPendingUpload(absPath)
@@ -601,14 +631,14 @@ func (b *backgroundWriter) run() {
 		// clean empty dirs up to root
 		thisDir := cleanPath(path.Dir(remote))
 		for thisDir != "" {
-			thisList, err := b.fs.tempFs.List(context.TODO(), thisDir)
+			thisList, err := b.fs.tempFs.List(thisDir)
 			if err != nil {
 				break
 			}
 			if len(thisList) > 0 {
 				break
 			}
-			err = b.fs.tempFs.Rmdir(context.TODO(), thisDir)
+			err = b.fs.tempFs.Rmdir(thisDir)
 			fs.Debugf(thisDir, "cleaned from temp path")
 			if err != nil {
 				break

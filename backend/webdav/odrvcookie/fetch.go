@@ -3,9 +3,7 @@ package odrvcookie
 
 import (
 	"bytes"
-	"context"
 	"encoding/xml"
-	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/cookiejar"
@@ -13,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/fshttp"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/fshttp"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -33,37 +31,19 @@ type CookieResponse struct {
 	FedAuth http.Cookie
 }
 
-// SharepointSuccessResponse holds a response from a successful microsoft login
-type SharepointSuccessResponse struct {
+// SuccessResponse hold a response from the sharepoint webdav
+type SuccessResponse struct {
 	XMLName xml.Name            `xml:"Envelope"`
-	Body    SuccessResponseBody `xml:"Body"`
+	Succ    SuccessResponseBody `xml:"Body"`
 }
 
-// SuccessResponseBody is the body of a successful response, it holds the token
+// SuccessResponseBody is the body of a success response, it holds the token
 type SuccessResponseBody struct {
 	XMLName xml.Name
 	Type    string    `xml:"RequestSecurityTokenResponse>TokenType"`
 	Created time.Time `xml:"RequestSecurityTokenResponse>Lifetime>Created"`
 	Expires time.Time `xml:"RequestSecurityTokenResponse>Lifetime>Expires"`
 	Token   string    `xml:"RequestSecurityTokenResponse>RequestedSecurityToken>BinarySecurityToken"`
-}
-
-// SharepointError holds a error response microsoft login
-type SharepointError struct {
-	XMLName xml.Name          `xml:"Envelope"`
-	Body    ErrorResponseBody `xml:"Body"`
-}
-
-func (e *SharepointError) Error() string {
-	return fmt.Sprintf("%s: %s (%s)", e.Body.FaultCode, e.Body.Reason, e.Body.Detail)
-}
-
-// ErrorResponseBody contains the body of a erroneous repsonse
-type ErrorResponseBody struct {
-	XMLName   xml.Name
-	FaultCode string `xml:"Fault>Code>Subcode>Value"`
-	Reason    string `xml:"Fault>Reason>Text"`
-	Detail    string `xml:"Fault>Detail>error>internalerror>text"`
 }
 
 // reqString is a template that gets populated with the user data in order to retrieve a "BinarySecurityToken"
@@ -111,18 +91,18 @@ func New(pUser, pPass, pEndpoint string) CookieAuth {
 
 // Cookies creates a CookieResponse. It fetches the auth token and then
 // retrieves the Cookies
-func (ca *CookieAuth) Cookies(ctx context.Context) (*CookieResponse, error) {
-	tokenResp, err := ca.getSPToken(ctx)
+func (ca *CookieAuth) Cookies() (*CookieResponse, error) {
+	tokenResp, err := ca.getSPToken()
 	if err != nil {
 		return nil, err
 	}
 	return ca.getSPCookie(tokenResp)
 }
 
-func (ca *CookieAuth) getSPCookie(conf *SharepointSuccessResponse) (*CookieResponse, error) {
+func (ca *CookieAuth) getSPCookie(conf *SuccessResponse) (*CookieResponse, error) {
 	spRoot, err := url.Parse(ca.endpoint)
 	if err != nil {
-		return nil, errors.Wrap(err, "Error while constructing endpoint URL")
+		return nil, errors.Wrap(err, "Error while contructing endpoint URL")
 	}
 
 	u, err := url.Parse("https://" + spRoot.Host + "/_forms/default.aspx?wa=wsignin1.0")
@@ -141,8 +121,8 @@ func (ca *CookieAuth) getSPCookie(conf *SharepointSuccessResponse) (*CookieRespo
 		Jar: jar,
 	}
 
-	// Send the previously acquired Token as a Post parameter
-	if _, err = client.Post(u.String(), "text/xml", strings.NewReader(conf.Body.Token)); err != nil {
+	// Send the previously aquired Token as a Post parameter
+	if _, err = client.Post(u.String(), "text/xml", strings.NewReader(conf.Succ.Token)); err != nil {
 		return nil, errors.Wrap(err, "Error while grabbing cookies from endpoint: %v")
 	}
 
@@ -160,7 +140,7 @@ func (ca *CookieAuth) getSPCookie(conf *SharepointSuccessResponse) (*CookieRespo
 	return &cookieResponse, nil
 }
 
-func (ca *CookieAuth) getSPToken(ctx context.Context) (conf *SharepointSuccessResponse, err error) {
+func (ca *CookieAuth) getSPToken() (conf *SuccessResponse, err error) {
 	reqData := map[string]interface{}{
 		"Username": ca.user,
 		"Password": ca.pass,
@@ -180,7 +160,6 @@ func (ca *CookieAuth) getSPToken(ctx context.Context) (conf *SharepointSuccessRe
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx) // go1.13 can use NewRequestWithContext
 
 	client := fshttp.NewClient(fs.Config)
 	resp, err := client.Do(req)
@@ -196,21 +175,12 @@ func (ca *CookieAuth) getSPToken(ctx context.Context) (conf *SharepointSuccessRe
 	}
 	s := respBuf.Bytes()
 
-	conf = &SharepointSuccessResponse{}
+	conf = &SuccessResponse{}
 	err = xml.Unmarshal(s, conf)
-	if conf.Body.Token == "" {
-		// xml Unmarshal won't fail if the response doesn't contain a token
-		// However, the token will be empty
-		sErr := &SharepointError{}
-
-		errSErr := xml.Unmarshal(s, sErr)
-		if errSErr == nil {
-			return nil, sErr
-		}
-	}
-
 	if err != nil {
+		// FIXME: Try to parse with FailedResponse struct (check for server error code)
 		return nil, errors.Wrap(err, "Error while reading endpoint response")
 	}
+
 	return
 }

@@ -1,15 +1,13 @@
 package size
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
@@ -17,8 +15,7 @@ var jsonOutput bool
 
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
-	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &jsonOutput, "json", "", false, "format output as JSON")
+	commandDefinition.Flags().BoolVar(&jsonOutput, "json", false, "format output as JSON")
 }
 
 var commandDefinition = &cobra.Command{
@@ -34,7 +31,7 @@ var commandDefinition = &cobra.Command{
 				Bytes int64 `json:"bytes"`
 			}
 
-			results.Count, results.Bytes, err = operations.Count(context.Background(), fsrc)
+			results.Count, results.Bytes, err = operations.Count(fsrc)
 			if err != nil {
 				return err
 			}

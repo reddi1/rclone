@@ -4,7 +4,6 @@ package box
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
@@ -15,15 +14,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ncw/rclone/backend/box/api"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/accounting"
+	"github.com/ncw/rclone/lib/rest"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/backend/box/api"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/accounting"
-	"github.com/rclone/rclone/lib/rest"
 )
 
 // createUploadSession creates an upload session for the object
-func (o *Object) createUploadSession(ctx context.Context, leaf, directoryID string, size int64) (response *api.UploadSessionResponse, err error) {
+func (o *Object) createUploadSession(leaf, directoryID string, size int64) (response *api.UploadSessionResponse, err error) {
 	opts := rest.Opts{
 		Method:  "POST",
 		Path:    "/files/upload_sessions",
@@ -38,11 +37,11 @@ func (o *Object) createUploadSession(ctx context.Context, leaf, directoryID stri
 	} else {
 		opts.Path = "/files/upload_sessions"
 		request.FolderID = directoryID
-		request.FileName = o.fs.opt.Enc.FromStandardName(leaf)
+		request.FileName = replaceReservedChars(leaf)
 	}
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, &request, &response)
+		resp, err = o.fs.srv.CallJSON(&opts, &request, &response)
 		return shouldRetry(resp, err)
 	})
 	return
@@ -54,7 +53,7 @@ func sha1Digest(digest []byte) string {
 }
 
 // uploadPart uploads a part in an upload session
-func (o *Object) uploadPart(ctx context.Context, SessionID string, offset, totalSize int64, chunk []byte, wrap accounting.WrapFn) (response *api.UploadPartResponse, err error) {
+func (o *Object) uploadPart(SessionID string, offset, totalSize int64, chunk []byte, wrap accounting.WrapFn) (response *api.UploadPartResponse, err error) {
 	chunkSize := int64(len(chunk))
 	sha1sum := sha1.Sum(chunk)
 	opts := rest.Opts{
@@ -71,7 +70,7 @@ func (o *Object) uploadPart(ctx context.Context, SessionID string, offset, total
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		opts.Body = wrap(bytes.NewReader(chunk))
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &response)
+		resp, err = o.fs.srv.CallJSON(&opts, nil, &response)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -81,7 +80,7 @@ func (o *Object) uploadPart(ctx context.Context, SessionID string, offset, total
 }
 
 // commitUpload finishes an upload session
-func (o *Object) commitUpload(ctx context.Context, SessionID string, parts []api.Part, modTime time.Time, sha1sum []byte) (result *api.FolderItems, err error) {
+func (o *Object) commitUpload(SessionID string, parts []api.Part, modTime time.Time, sha1sum []byte) (result *api.FolderItems, err error) {
 	opts := rest.Opts{
 		Method:  "POST",
 		Path:    "/files/upload_sessions/" + SessionID + "/commit",
@@ -97,15 +96,13 @@ func (o *Object) commitUpload(ctx context.Context, SessionID string, parts []api
 	request.Attributes.ContentCreatedAt = api.Time(modTime)
 	var body []byte
 	var resp *http.Response
-	// For discussion of this value see:
-	// https://github.com/rclone/rclone/issues/2054
-	maxTries := o.fs.opt.CommitRetries
+	maxTries := fs.Config.LowLevelRetries
 	const defaultDelay = 10
 	var tries int
 outer:
 	for tries = 0; tries < maxTries; tries++ {
 		err = o.fs.pacer.Call(func() (bool, error) {
-			resp, err = o.fs.srv.CallJSON(ctx, &opts, &request, nil)
+			resp, err = o.fs.srv.CallJSON(&opts, &request, nil)
 			if err != nil {
 				return shouldRetry(resp, err)
 			}
@@ -113,7 +110,7 @@ outer:
 			return shouldRetry(resp, err)
 		})
 		delay := defaultDelay
-		var why string
+		why := "unknown"
 		if err != nil {
 			// Sometimes we get 400 Error with
 			// parts_mismatch immediately after uploading
@@ -155,7 +152,7 @@ outer:
 }
 
 // abortUpload cancels an upload session
-func (o *Object) abortUpload(ctx context.Context, SessionID string) (err error) {
+func (o *Object) abortUpload(SessionID string) (err error) {
 	opts := rest.Opts{
 		Method:     "DELETE",
 		Path:       "/files/upload_sessions/" + SessionID,
@@ -164,16 +161,16 @@ func (o *Object) abortUpload(ctx context.Context, SessionID string) (err error) 
 	}
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
+		resp, err = o.fs.srv.Call(&opts)
 		return shouldRetry(resp, err)
 	})
 	return err
 }
 
 // uploadMultipart uploads a file using multipart upload
-func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, modTime time.Time) (err error) {
+func (o *Object) uploadMultipart(in io.Reader, leaf, directoryID string, size int64, modTime time.Time) (err error) {
 	// Create upload session
-	session, err := o.createUploadSession(ctx, leaf, directoryID, size)
+	session, err := o.createUploadSession(leaf, directoryID, size)
 	if err != nil {
 		return errors.Wrap(err, "multipart upload create session failed")
 	}
@@ -184,7 +181,7 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 	defer func() {
 		if err != nil {
 			fs.Debugf(o, "Cancelling multipart upload: %v", err)
-			cancelErr := o.abortUpload(ctx, session.ID)
+			cancelErr := o.abortUpload(session.ID)
 			if cancelErr != nil {
 				fs.Logf(o, "Failed to cancel multipart upload: %v", err)
 			}
@@ -212,8 +209,8 @@ outer:
 		}
 
 		reqSize := remaining
-		if reqSize >= chunkSize {
-			reqSize = chunkSize
+		if reqSize >= int64(chunkSize) {
+			reqSize = int64(chunkSize)
 		}
 
 		// Make a block of memory
@@ -236,7 +233,7 @@ outer:
 			defer wg.Done()
 			defer o.fs.uploadToken.Put()
 			fs.Debugf(o, "Uploading part %d/%d offset %v/%v part size %v", part+1, session.TotalParts, fs.SizeSuffix(position), fs.SizeSuffix(size), fs.SizeSuffix(chunkSize))
-			partResponse, err := o.uploadPart(ctx, session.ID, position, size, buf, wrap)
+			partResponse, err := o.uploadPart(session.ID, position, size, buf, wrap)
 			if err != nil {
 				err = errors.Wrap(err, "multipart upload failed to upload part")
 				select {
@@ -264,7 +261,7 @@ outer:
 	}
 
 	// Finalise the upload session
-	result, err := o.commitUpload(ctx, session.ID, parts, modTime, hash.Sum(nil))
+	result, err := o.commitUpload(session.ID, parts, modTime, hash.Sum(nil))
 	if err != nil {
 		return errors.Wrap(err, "multipart upload failed to finalize")
 	}

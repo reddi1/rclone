@@ -1,20 +1,19 @@
 package ls
 
 import (
-	"context"
 	"os"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/cmd/ls/lshelp"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/cmd/ls/lshelp"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "ls remote:path",
 	Short: `List the objects in the path with size and path.`,
 	Long: `
@@ -34,7 +33,7 @@ Eg
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {
-			return operations.List(context.Background(), fsrc, os.Stdout)
+			return operations.List(fsrc, os.Stdout)
 		})
 	},
 }

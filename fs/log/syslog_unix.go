@@ -10,7 +10,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/rclone/rclone/fs"
+	"github.com/ncw/rclone/fs"
 )
 
 var (
@@ -32,9 +32,9 @@ var (
 
 // Starts syslog
 func startSysLog() bool {
-	facility, ok := syslogFacilityMap[Opt.SyslogFacility]
+	facility, ok := syslogFacilityMap[*syslogFacility]
 	if !ok {
-		log.Fatalf("Unknown syslog facility %q - man syslog for list", Opt.SyslogFacility)
+		log.Fatalf("Unknown syslog facility %q - man syslog for list", *syslogFacility)
 	}
 	Me := path.Base(os.Args[0])
 	w, err := syslog.New(syslog.LOG_NOTICE|facility, Me)

@@ -3,14 +3,13 @@ package mockobject
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"time"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/hash"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/hash"
 )
 
 var errNotImpl = errors.New("not implemented")
@@ -40,13 +39,13 @@ func (o Object) Remote() string {
 
 // Hash returns the selected checksum of the file
 // If no checksum is available it returns ""
-func (o Object) Hash(ctx context.Context, t hash.Type) (string, error) {
+func (o Object) Hash(hash.Type) (string, error) {
 	return "", errNotImpl
 }
 
 // ModTime returns the modification date of the file
 // It should return a best guess if one isn't available
-func (o Object) ModTime(ctx context.Context) (t time.Time) {
+func (o Object) ModTime() (t time.Time) {
 	return t
 }
 
@@ -59,22 +58,22 @@ func (o Object) Storable() bool {
 }
 
 // SetModTime sets the metadata on the object to set the modification date
-func (o Object) SetModTime(ctx context.Context, t time.Time) error {
+func (o Object) SetModTime(time.Time) error {
 	return errNotImpl
 }
 
 // Open opens the file for read.  Call Close() on the returned io.ReadCloser
-func (o Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
+func (o Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	return nil, errNotImpl
 }
 
 // Update in to the object with the modTime given of the given size
-func (o Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+func (o Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	return errNotImpl
 }
 
 // Remove this object
-func (o Object) Remove(ctx context.Context) error {
+func (o Object) Remove() error {
 	return errNotImpl
 }
 
@@ -93,59 +92,37 @@ const (
 // SeekModes contains all valid SeekMode's
 var SeekModes = []SeekMode{SeekModeNone, SeekModeRegular, SeekModeRange}
 
-// ContentMockObject mocks an fs.Object and has content
-type ContentMockObject struct {
+type contentMockObject struct {
 	Object
-	content     []byte
-	seekMode    SeekMode
-	f           fs.Fs
-	unknownSize bool
+	content  []byte
+	seekMode SeekMode
 }
 
 // WithContent returns a fs.Object with the given content.
-func (o Object) WithContent(content []byte, mode SeekMode) *ContentMockObject {
-	return &ContentMockObject{
+func (o Object) WithContent(content []byte, mode SeekMode) fs.Object {
+	return &contentMockObject{
 		Object:   o,
 		content:  content,
 		seekMode: mode,
 	}
 }
 
-// SetFs sets the return value of the Fs() call
-func (o *ContentMockObject) SetFs(f fs.Fs) {
-	o.f = f
-}
-
-// SetUnknownSize makes the mock object return -1 for size if true
-func (o *ContentMockObject) SetUnknownSize(unknownSize bool) {
-	o.unknownSize = true
-}
-
-// Fs returns read only access to the Fs that this object is part of
-//
-// This is nil unless SetFs has been called
-func (o *ContentMockObject) Fs() fs.Info {
-	return o.f
-}
-
-// Open opens the file for read.  Call Close() on the returned io.ReadCloser
-func (o *ContentMockObject) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
-	size := int64(len(o.content))
+func (o *contentMockObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	var offset, limit int64 = 0, -1
 	for _, option := range options {
 		switch x := option.(type) {
 		case *fs.SeekOption:
 			offset = x.Offset
 		case *fs.RangeOption:
-			offset, limit = x.Decode(size)
+			offset, limit = x.Decode(o.Size())
 		default:
 			if option.Mandatory() {
 				return nil, fmt.Errorf("Unsupported mandatory option: %v", option)
 			}
 		}
 	}
-	if limit == -1 || offset+limit > size {
-		limit = size - offset
+	if limit == -1 || offset+limit > o.Size() {
+		limit = o.Size() - offset
 	}
 
 	var r *bytes.Reader
@@ -169,12 +146,7 @@ func (o *ContentMockObject) Open(ctx context.Context, options ...fs.OpenOption) 
 		return nil, errors.New(o.seekMode.String())
 	}
 }
-
-// Size returns the size of the file
-func (o *ContentMockObject) Size() int64 {
-	if o.unknownSize {
-		return -1
-	}
+func (o *contentMockObject) Size() int64 {
 	return int64(len(o.content))
 }
 

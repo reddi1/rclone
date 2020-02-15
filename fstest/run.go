@@ -26,7 +26,6 @@ package fstest
 
 import (
 	"bytes"
-	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -38,12 +37,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/cache"
-	"github.com/rclone/rclone/fs/fserrors"
-	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/object"
-	"github.com/rclone/rclone/fs/walk"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/fserrors"
+	"github.com/ncw/rclone/fs/object"
+	"github.com/ncw/rclone/fs/walk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -92,7 +89,7 @@ func newRun() *Run {
 	Initialise()
 
 	var err error
-	r.Fremote, r.FremoteName, r.cleanRemote, err = RandomRemote()
+	r.Fremote, r.FremoteName, r.cleanRemote, err = RandomRemote(*RemoteName, *SubDir)
 	if err != nil {
 		r.Fatalf("Failed to open remote %q: %v", *RemoteName, err)
 	}
@@ -124,18 +121,16 @@ func retry(t *testing.T, what string, f func() error) {
 	t.Logf("%s failed: %v", what, err)
 }
 
-// newRunIndividual initialise the remote and local for testing and
-// returns a run object.  Pass in true to make individual tests or
-// false to use the global one.
+// NewRun initialise the remote and local for testing and returns a
+// run object.  Call this from the tests.
 //
 // r.Flocal is an empty local Fs
 // r.Fremote is an empty remote Fs
 //
 // Finalise() will tidy them away when done.
-func newRunIndividual(t *testing.T, individual bool) *Run {
-	ctx := context.Background()
+func NewRun(t *testing.T) *Run {
 	var r *Run
-	if individual {
+	if *Individual {
 		r = newRun()
 	} else {
 		// If not individual, use the global one with the clean method overridden
@@ -143,11 +138,17 @@ func newRunIndividual(t *testing.T, individual bool) *Run {
 		*r = *oneRun
 		r.cleanRemote = func() {
 			var toDelete []string
-			err := walk.ListR(ctx, r.Fremote, "", true, -1, walk.ListAll, func(entries fs.DirEntries) error {
+			err := walk.Walk(r.Fremote, "", true, -1, func(dirPath string, entries fs.DirEntries, err error) error {
+				if err != nil {
+					if err == fs.ErrorDirNotFound {
+						return nil
+					}
+					t.Fatalf("Error listing: %v", err)
+				}
 				for _, entry := range entries {
 					switch x := entry.(type) {
 					case fs.Object:
-						retry(t, fmt.Sprintf("removing file %q", x.Remote()), func() error { return x.Remove(ctx) })
+						retry(t, fmt.Sprintf("removing file %q", x.Remote()), x.Remove)
 					case fs.Directory:
 						toDelete = append(toDelete, x.Remote())
 					}
@@ -162,35 +163,17 @@ func newRunIndividual(t *testing.T, individual bool) *Run {
 			for i := len(toDelete) - 1; i >= 0; i-- {
 				dir := toDelete[i]
 				retry(t, fmt.Sprintf("removing dir %q", dir), func() error {
-					return r.Fremote.Rmdir(ctx, dir)
+					return r.Fremote.Rmdir(dir)
 				})
 			}
 			// Check remote is empty
 			CheckListingWithPrecision(t, r.Fremote, []Item{}, []string{}, r.Fremote.Precision())
-			// Clear the remote cache
-			cache.Clear()
 		}
 	}
 	r.Logf = t.Logf
 	r.Fatalf = t.Fatalf
 	r.Logf("Remote %q, Local %q, Modify Window %q", r.Fremote, r.Flocal, fs.GetModifyWindow(r.Fremote))
 	return r
-}
-
-// NewRun initialise the remote and local for testing and returns a
-// run object.  Call this from the tests.
-//
-// r.Flocal is an empty local Fs
-// r.Fremote is an empty remote Fs
-//
-// Finalise() will tidy them away when done.
-func NewRun(t *testing.T) *Run {
-	return newRunIndividual(t, *Individual)
-}
-
-// NewRunIndividual as per NewRun but makes an individual remote for this test
-func NewRunIndividual(t *testing.T) *Run {
-	return newRunIndividual(t, true)
 }
 
 // RenameFile renames a file in local
@@ -228,8 +211,8 @@ func (r *Run) WriteFile(filePath, content string, t time.Time) Item {
 }
 
 // ForceMkdir creates the remote
-func (r *Run) ForceMkdir(ctx context.Context, f fs.Fs) {
-	err := f.Mkdir(ctx, "")
+func (r *Run) ForceMkdir(f fs.Fs) {
+	err := f.Mkdir("")
 	if err != nil {
 		r.Fatalf("Failed to mkdir %q: %v", f, err)
 	}
@@ -237,14 +220,14 @@ func (r *Run) ForceMkdir(ctx context.Context, f fs.Fs) {
 }
 
 // Mkdir creates the remote if it hasn't been created already
-func (r *Run) Mkdir(ctx context.Context, f fs.Fs) {
+func (r *Run) Mkdir(f fs.Fs) {
 	if !r.mkdir[f.String()] {
-		r.ForceMkdir(ctx, f)
+		r.ForceMkdir(f)
 	}
 }
 
 // WriteObjectTo writes an object to the fs, remote passed in
-func (r *Run) WriteObjectTo(ctx context.Context, f fs.Fs, remote, content string, modTime time.Time, useUnchecked bool) Item {
+func (r *Run) WriteObjectTo(f fs.Fs, remote, content string, modTime time.Time, useUnchecked bool) Item {
 	put := f.Put
 	if useUnchecked {
 		put = f.Features().PutUnchecked
@@ -252,24 +235,12 @@ func (r *Run) WriteObjectTo(ctx context.Context, f fs.Fs, remote, content string
 			r.Fatalf("Fs doesn't support PutUnchecked")
 		}
 	}
-	r.Mkdir(ctx, f)
-
-	// caclulate all hashes f supports for content
-	hash, err := hash.NewMultiHasherTypes(f.Hashes())
-	if err != nil {
-		r.Fatalf("Failed to make new multi hasher: %v", err)
-	}
-	_, err = hash.Write([]byte(content))
-	if err != nil {
-		r.Fatalf("Failed to make write to hash: %v", err)
-	}
-	hashSums := hash.Sums()
-
+	r.Mkdir(f)
 	const maxTries = 10
 	for tries := 1; ; tries++ {
 		in := bytes.NewBufferString(content)
-		objinfo := object.NewStaticObjectInfo(remote, modTime, int64(len(content)), true, hashSums, nil)
-		_, err := put(ctx, in, objinfo)
+		objinfo := object.NewStaticObjectInfo(remote, modTime, int64(len(content)), true, nil, nil)
+		_, err := put(in, objinfo)
 		if err == nil {
 			break
 		}
@@ -285,19 +256,19 @@ func (r *Run) WriteObjectTo(ctx context.Context, f fs.Fs, remote, content string
 }
 
 // WriteObject writes an object to the remote
-func (r *Run) WriteObject(ctx context.Context, remote, content string, modTime time.Time) Item {
-	return r.WriteObjectTo(ctx, r.Fremote, remote, content, modTime, false)
+func (r *Run) WriteObject(remote, content string, modTime time.Time) Item {
+	return r.WriteObjectTo(r.Fremote, remote, content, modTime, false)
 }
 
 // WriteUncheckedObject writes an object to the remote not checking for duplicates
-func (r *Run) WriteUncheckedObject(ctx context.Context, remote, content string, modTime time.Time) Item {
-	return r.WriteObjectTo(ctx, r.Fremote, remote, content, modTime, true)
+func (r *Run) WriteUncheckedObject(remote, content string, modTime time.Time) Item {
+	return r.WriteObjectTo(r.Fremote, remote, content, modTime, true)
 }
 
 // WriteBoth calls WriteObject and WriteFile with the same arguments
-func (r *Run) WriteBoth(ctx context.Context, remote, content string, modTime time.Time) Item {
+func (r *Run) WriteBoth(remote, content string, modTime time.Time) Item {
 	r.WriteFile(remote, content, modTime)
-	return r.WriteObject(ctx, remote, content, modTime)
+	return r.WriteObject(remote, content, modTime)
 }
 
 // CheckWithDuplicates does a test but allows duplicates
@@ -311,7 +282,7 @@ func (r *Run) CheckWithDuplicates(t *testing.T, items ...Item) {
 	sort.Strings(want)
 
 	// do the listing
-	objs, _, err := walk.GetAll(context.Background(), r.Fremote, "", true, -1)
+	objs, _, err := walk.GetAll(r.Fremote, "", true, -1)
 	if err != nil && err != fs.ErrorDirNotFound {
 		t.Fatalf("Error listing: %v", err)
 	}
@@ -339,6 +310,4 @@ func (r *Run) Finalise() {
 	r.cleanRemote()
 	// r.Logf("Cleaning local %q", r.LocalName)
 	r.cleanTempDir()
-	// Clear the remote cache
-	cache.Clear()
 }

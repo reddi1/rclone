@@ -3,14 +3,13 @@ package object
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"io/ioutil"
 	"time"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/hash"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/hash"
 )
 
 // NewStaticObjectInfo returns a static ObjectInfo
@@ -44,13 +43,13 @@ type staticObjectInfo struct {
 	fs       fs.Info
 }
 
-func (i *staticObjectInfo) Fs() fs.Info                           { return i.fs }
-func (i *staticObjectInfo) Remote() string                        { return i.remote }
-func (i *staticObjectInfo) String() string                        { return i.remote }
-func (i *staticObjectInfo) ModTime(ctx context.Context) time.Time { return i.modTime }
-func (i *staticObjectInfo) Size() int64                           { return i.size }
-func (i *staticObjectInfo) Storable() bool                        { return i.storable }
-func (i *staticObjectInfo) Hash(ctx context.Context, h hash.Type) (string, error) {
+func (i *staticObjectInfo) Fs() fs.Info        { return i.fs }
+func (i *staticObjectInfo) Remote() string     { return i.remote }
+func (i *staticObjectInfo) String() string     { return i.remote }
+func (i *staticObjectInfo) ModTime() time.Time { return i.modTime }
+func (i *staticObjectInfo) Size() int64        { return i.size }
+func (i *staticObjectInfo) Storable() bool     { return i.storable }
+func (i *staticObjectInfo) Hash(h hash.Type) (string, error) {
 	if len(i.hashes) == 0 {
 		return "", hash.ErrUnsupported
 	}
@@ -79,7 +78,7 @@ func (memoryFs) String() string { return "memory" }
 func (memoryFs) Precision() time.Duration { return time.Nanosecond }
 
 // Returns the supported hash types of the filesystem
-func (memoryFs) Hashes() hash.Set { return hash.Supported() }
+func (memoryFs) Hashes() hash.Set { return hash.Supported }
 
 // Features returns the optional features of this Fs
 func (memoryFs) Features() *fs.Features { return &fs.Features{} }
@@ -93,13 +92,13 @@ func (memoryFs) Features() *fs.Features { return &fs.Features{} }
 //
 // This should return ErrDirNotFound if the directory isn't
 // found.
-func (memoryFs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+func (memoryFs) List(dir string) (entries fs.DirEntries, err error) {
 	return nil, nil
 }
 
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error ErrorObjectNotFound.
-func (memoryFs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+func (memoryFs) NewObject(remote string) (fs.Object, error) {
 	return nil, fs.ErrorObjectNotFound
 }
 
@@ -108,22 +107,22 @@ func (memoryFs) NewObject(ctx context.Context, remote string) (fs.Object, error)
 // May create the object even if it returns an error - if so
 // will return the object and the error, otherwise will return
 // nil and the error
-func (memoryFs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	o := NewMemoryObject(src.Remote(), src.ModTime(ctx), nil)
-	return o, o.Update(ctx, in, src, options...)
+func (memoryFs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	o := NewMemoryObject(src.Remote(), src.ModTime(), nil)
+	return o, o.Update(in, src, options...)
 }
 
 // Mkdir makes the directory (container, bucket)
 //
 // Shouldn't return an error if it already exists
-func (memoryFs) Mkdir(ctx context.Context, dir string) error {
+func (memoryFs) Mkdir(dir string) error {
 	return errors.New("memoryFs: can't make directory")
 }
 
 // Rmdir removes the directory (container, bucket) if empty
 //
 // Return an error if it doesn't exist or isn't empty
-func (memoryFs) Rmdir(ctx context.Context, dir string) error {
+func (memoryFs) Rmdir(dir string) error {
 	return fs.ErrorDirNotFound
 }
 
@@ -166,7 +165,7 @@ func (o *MemoryObject) String() string {
 }
 
 // ModTime returns the modification date of the file
-func (o *MemoryObject) ModTime(ctx context.Context) time.Time {
+func (o *MemoryObject) ModTime() time.Time {
 	return o.modTime
 }
 
@@ -181,7 +180,7 @@ func (o *MemoryObject) Storable() bool {
 }
 
 // Hash returns the requested hash of the contents
-func (o *MemoryObject) Hash(ctx context.Context, h hash.Type) (string, error) {
+func (o *MemoryObject) Hash(h hash.Type) (string, error) {
 	hash, err := hash.NewMultiHasherTypes(hash.Set(h))
 	if err != nil {
 		return "", err
@@ -194,13 +193,13 @@ func (o *MemoryObject) Hash(ctx context.Context, h hash.Type) (string, error) {
 }
 
 // SetModTime sets the metadata on the object to set the modification date
-func (o *MemoryObject) SetModTime(ctx context.Context, modTime time.Time) error {
+func (o *MemoryObject) SetModTime(modTime time.Time) error {
 	o.modTime = modTime
 	return nil
 }
 
 // Open opens the file for read.  Call Close() on the returned io.ReadCloser
-func (o *MemoryObject) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
+func (o *MemoryObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	content := o.content
 	for _, option := range options {
 		switch x := option.(type) {
@@ -220,7 +219,7 @@ func (o *MemoryObject) Open(ctx context.Context, options ...fs.OpenOption) (io.R
 // Update in to the object with the modTime given of the given size
 //
 // This re-uses the internal buffer if at all possible.
-func (o *MemoryObject) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
+func (o *MemoryObject) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	size := src.Size()
 	if size == 0 {
 		o.content = nil
@@ -230,11 +229,11 @@ func (o *MemoryObject) Update(ctx context.Context, in io.Reader, src fs.ObjectIn
 		o.content = o.content[:size]
 		_, err = io.ReadFull(in, o.content)
 	}
-	o.modTime = src.ModTime(ctx)
+	o.modTime = src.ModTime()
 	return err
 }
 
 // Remove this object
-func (o *MemoryObject) Remove(ctx context.Context) error {
+func (o *MemoryObject) Remove() error {
 	return errors.New("memoryObject.Remove not supported")
 }

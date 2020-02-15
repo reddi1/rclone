@@ -3,19 +3,20 @@
 package cache
 
 import (
-	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
-	cache "github.com/patrickmn/go-cache"
-	"github.com/rclone/rclone/fs"
+	"sync"
+
+	"bytes"
+	"io/ioutil"
+
+	"github.com/ncw/rclone/fs"
+	"github.com/patrickmn/go-cache"
 	"golang.org/x/net/websocket"
 )
 
@@ -53,7 +54,6 @@ type plexConnector struct {
 	username   string
 	password   string
 	token      string
-	insecure   bool
 	f          *Fs
 	mu         sync.Mutex
 	running    bool
@@ -63,7 +63,7 @@ type plexConnector struct {
 }
 
 // newPlexConnector connects to a Plex server and generates a token
-func newPlexConnector(f *Fs, plexURL, username, password string, insecure bool, saveToken func(string)) (*plexConnector, error) {
+func newPlexConnector(f *Fs, plexURL, username, password string, saveToken func(string)) (*plexConnector, error) {
 	u, err := url.ParseRequestURI(strings.TrimRight(plexURL, "/"))
 	if err != nil {
 		return nil, err
@@ -75,7 +75,6 @@ func newPlexConnector(f *Fs, plexURL, username, password string, insecure bool, 
 		username:   username,
 		password:   password,
 		token:      "",
-		insecure:   insecure,
 		stateCache: cache.New(time.Hour, time.Minute),
 		saveToken:  saveToken,
 	}
@@ -84,7 +83,7 @@ func newPlexConnector(f *Fs, plexURL, username, password string, insecure bool, 
 }
 
 // newPlexConnector connects to a Plex server and generates a token
-func newPlexConnectorWithToken(f *Fs, plexURL, token string, insecure bool) (*plexConnector, error) {
+func newPlexConnectorWithToken(f *Fs, plexURL, token string) (*plexConnector, error) {
 	u, err := url.ParseRequestURI(strings.TrimRight(plexURL, "/"))
 	if err != nil {
 		return nil, err
@@ -94,7 +93,6 @@ func newPlexConnectorWithToken(f *Fs, plexURL, token string, insecure bool) (*pl
 		f:          f,
 		url:        u,
 		token:      token,
-		insecure:   insecure,
 		stateCache: cache.New(time.Hour, time.Minute),
 	}
 	pc.listenWebsocket()
@@ -109,26 +107,14 @@ func (p *plexConnector) closeWebsocket() {
 	p.running = false
 }
 
-func (p *plexConnector) websocketDial() (*websocket.Conn, error) {
-	u := strings.TrimRight(strings.Replace(strings.Replace(
-		p.url.String(), "http://", "ws://", 1), "https://", "wss://", 1), "/")
-	url := fmt.Sprintf(defPlexNotificationURL, u, p.token)
-
-	config, err := websocket.NewConfig(url, "http://localhost")
-	if err != nil {
-		return nil, err
-	}
-	if p.insecure {
-		config.TlsConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-	return websocket.DialConfig(config)
-}
-
 func (p *plexConnector) listenWebsocket() {
 	p.runningMu.Lock()
 	defer p.runningMu.Unlock()
 
-	conn, err := p.websocketDial()
+	u := strings.Replace(p.url.String(), "http://", "ws://", 1)
+	u = strings.Replace(u, "https://", "wss://", 1)
+	conn, err := websocket.Dial(fmt.Sprintf(defPlexNotificationURL, strings.TrimRight(u, "/"), p.token),
+		"", "http://localhost")
 	if err != nil {
 		fs.Errorf("plex", "%v", err)
 		return
@@ -224,9 +210,7 @@ func (p *plexConnector) authenticate() error {
 	}
 	p.token = token
 	if p.token != "" {
-		if p.saveToken != nil {
-			p.saveToken(p.token)
-		}
+		p.saveToken(p.token)
 		fs.Infof(p.f.Name(), "Connected to Plex server: %v", p.url.String())
 	}
 	p.listenWebsocket()

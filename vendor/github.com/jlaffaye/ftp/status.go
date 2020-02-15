@@ -104,8 +104,3 @@ var statusText = map[int]string{
 	StatusExceededStorage:         "Exceeded storage allocation.",
 	StatusBadFileName:             "File name not allowed.",
 }
-
-// StatusText returns a text for the FTP status code. It returns the empty string if the code is unknown.
-func StatusText(code int) string {
-	return statusText[code]
-}

@@ -20,12 +20,12 @@ var (
 )
 
 func randomSeekTest(size int64, in *os.File, name string) {
-	startTime := time.Now()
 	start := rand.Int63n(size)
 	blockSize := rand.Intn(*maxBlockSize)
 	if int64(blockSize) > size-start {
 		blockSize = int(size - start)
 	}
+	log.Printf("Reading %d from %d", blockSize, start)
 
 	_, err := in.Seek(start, io.SeekStart)
 	if err != nil {
@@ -37,8 +37,6 @@ func randomSeekTest(size int64, in *os.File, name string) {
 	if err != nil {
 		log.Fatalf("Read failed on %q: %v", name, err)
 	}
-
-	log.Printf("Reading %d from %d took %v ", blockSize, start, time.Since(startTime))
 }
 
 func main() {
@@ -50,12 +48,10 @@ func main() {
 	rand.Seed(*randSeed)
 
 	name := args[0]
-	openStart := time.Now()
 	in, err := os.Open(name)
 	if err != nil {
 		log.Fatalf("Couldn't open %q: %v", name, err)
 	}
-	log.Printf("File Open took %v", time.Since(openStart))
 
 	fi, err := in.Stat()
 	if err != nil {

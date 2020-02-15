@@ -1,21 +1,20 @@
 // FUSE main Fs
 
-// +build linux,go1.11 darwin,go1.11 freebsd,go1.11
+// +build linux darwin freebsd
 
 package mount
 
 import (
-	"context"
 	"syscall"
 
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/vfs"
+	"github.com/ncw/rclone/vfs/vfsflags"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/cmd/mountlib"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/log"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
+	"golang.org/x/net/context" // switch to "context" when we stop supporting go1.8
 )
 
 // FS represents the top level filing system
@@ -24,7 +23,7 @@ type FS struct {
 	f fs.Fs
 }
 
-// Check interface satisfied
+// Check interface satistfied
 var _ fusefs.FS = (*FS)(nil)
 
 // NewFS makes a new FS
@@ -46,7 +45,7 @@ func (f *FS) Root() (node fusefs.Node, err error) {
 	return &Dir{root}, nil
 }
 
-// Check interface satisfied
+// Check interface satsified
 var _ fusefs.FSStatfser = (*FS)(nil)
 
 // Statfs is called to obtain file system metadata.
@@ -58,8 +57,8 @@ func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.Sta
 	resp.Blocks = fsBlocks  // Total data blocks in file system.
 	resp.Bfree = fsBlocks   // Free blocks in file system.
 	resp.Bavail = fsBlocks  // Free blocks in file system if you're not root.
-	resp.Files = 1e9        // Total files in file system.
-	resp.Ffree = 1e9        // Free files in file system.
+	resp.Files = 1E9        // Total files in file system.
+	resp.Ffree = 1E9        // Free files in file system.
 	resp.Bsize = blockSize  // Block size
 	resp.Namelen = 255      // Maximum file name length?
 	resp.Frsize = blockSize // Fragment size, smallest addressable data size in the file system.
@@ -73,9 +72,6 @@ func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.Sta
 	if free >= 0 {
 		resp.Bavail = uint64(free) / blockSize
 	}
-	mountlib.ClipBlocks(&resp.Blocks)
-	mountlib.ClipBlocks(&resp.Bfree)
-	mountlib.ClipBlocks(&resp.Bavail)
 	return nil
 }
 

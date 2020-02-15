@@ -8,16 +8,16 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/billziss-gh/cgofuse/fuse"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/vfs"
+	"github.com/ncw/rclone/vfs/vfsflags"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/cmd/mountlib"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/log"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
 )
 
 const fhUnset = ^uint64(0)
@@ -246,12 +246,7 @@ func (fsys *FS) Readdir(dirPath string,
 	for _, item := range items {
 		node, ok := item.(vfs.Node)
 		if ok {
-			name := node.Name()
-			if len(name) > mountlib.MaxLeafSize {
-				fs.Errorf(dirPath, "Name too long (%d bytes) for FUSE, skipping: %s", len(name), name)
-				continue
-			}
-			fill(name, nil, 0)
+			fill(node.Name(), nil, 0)
 		}
 	}
 	itemsRead = len(items)
@@ -268,12 +263,15 @@ func (fsys *FS) Releasedir(path string, fh uint64) (errc int) {
 func (fsys *FS) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
 	defer log.Trace(path, "")("stat=%+v, errc=%d", stat, &errc)
 	const blockSize = 4096
-	const fsBlocks = (1 << 50) / blockSize
+	fsBlocks := uint64(1 << 50)
+	if runtime.GOOS == "windows" {
+		fsBlocks = (1 << 43) - 1
+	}
 	stat.Blocks = fsBlocks  // Total data blocks in file system.
 	stat.Bfree = fsBlocks   // Free blocks in file system.
 	stat.Bavail = fsBlocks  // Free blocks in file system if you're not root.
-	stat.Files = 1e9        // Total files in file system.
-	stat.Ffree = 1e9        // Free files in file system.
+	stat.Files = 1E9        // Total files in file system.
+	stat.Ffree = 1E9        // Free files in file system.
 	stat.Bsize = blockSize  // Block size
 	stat.Namemax = 255      // Maximum file name length?
 	stat.Frsize = blockSize // Fragment size, smallest addressable data size in the file system.
@@ -287,9 +285,6 @@ func (fsys *FS) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
 	if free >= 0 {
 		stat.Bavail = uint64(free) / blockSize
 	}
-	mountlib.ClipBlocks(&stat.Blocks)
-	mountlib.ClipBlocks(&stat.Bfree)
-	mountlib.ClipBlocks(&stat.Bavail)
 	return 0
 }
 
@@ -303,9 +298,6 @@ func (fsys *FS) Open(path string, flags int) (errc int, fh uint64) {
 	if err != nil {
 		return translateError(err), fhUnset
 	}
-
-	// FIXME add support for unknown length files setting direct_io
-	// See: https://github.com/billziss-gh/cgofuse/issues/38
 
 	return 0, fsys.openHandle(handle)
 }
@@ -371,12 +363,7 @@ func (fsys *FS) Write(path string, buff []byte, ofst int64, fh uint64) (n int) {
 	if errc != 0 {
 		return errc
 	}
-	var err error
-	if fsys.VFS.Opt.CacheMode < vfs.CacheModeWrites || handle.Node().Mode()&os.ModeAppend == 0 {
-		n, err = handle.WriteAt(buff, ofst)
-	} else {
-		n, err = handle.Write(buff)
-	}
+	n, err := handle.WriteAt(buff, ofst)
 	if err != nil {
 		return translateError(err)
 	}
@@ -441,11 +428,6 @@ func (fsys *FS) Rename(oldPath string, newPath string) (errc int) {
 	return translateError(fsys.VFS.Rename(oldPath, newPath))
 }
 
-// Windows sometimes seems to send times that are the epoch which is
-// 1601-01-01 +/- timezone so filter out times that are earlier than
-// this.
-var invalidDateCutoff = time.Date(1601, 1, 2, 0, 0, 0, 0, time.UTC)
-
 // Utimens changes the access and modification times of a file.
 func (fsys *FS) Utimens(path string, tmsp []fuse.Timespec) (errc int) {
 	defer log.Trace(path, "tmsp=%+v", tmsp)("errc=%d", &errc)
@@ -453,16 +435,12 @@ func (fsys *FS) Utimens(path string, tmsp []fuse.Timespec) (errc int) {
 	if errc != 0 {
 		return errc
 	}
+	var t time.Time
 	if tmsp == nil || len(tmsp) < 2 {
-		fs.Debugf(path, "Utimens: Not setting time as timespec isn't complete: %v", tmsp)
-		return 0
+		t = time.Now()
+	} else {
+		t = tmsp[1].Time()
 	}
-	t := tmsp[1].Time()
-	if t.Before(invalidDateCutoff) {
-		fs.Debugf(path, "Utimens: Not setting out of range time: %v", t)
-		return 0
-	}
-	fs.Debugf(path, "Utimens: SetModTime: %v", t)
 	return translateError(node.SetModTime(t))
 }
 

@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/config/flags"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/config"
 	"github.com/spf13/cobra"
 )
 
@@ -16,12 +15,11 @@ var (
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
-	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &listLong, "long", "", listLong, "Show the type as well as names.")
+	cmd.Root.AddCommand(commandDefintion)
+	commandDefintion.Flags().BoolVarP(&listLong, "long", "l", listLong, "Show the type as well as names.")
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "listremotes",
 	Short: `List all the remotes in the config file.`,
 	Long: `

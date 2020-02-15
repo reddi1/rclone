@@ -125,14 +125,15 @@ func sendPacket(w io.Writer, m encoding.BinaryMarshaler) error {
 	} else if debugDumpTxPacket {
 		debug("send packet: %s %d bytes", fxp(bb[0]), len(bb))
 	}
-	// Slide packet down 4 bytes to make room for length header.
-	packet := append(bb, make([]byte, 4)...) // optimistically assume bb has capacity
-	copy(packet[4:], bb)
-	binary.BigEndian.PutUint32(packet[:4], uint32(len(bb)))
-
-	_, err = w.Write(packet)
+	l := uint32(len(bb))
+	hdr := []byte{byte(l >> 24), byte(l >> 16), byte(l >> 8), byte(l)}
+	_, err = w.Write(hdr)
 	if err != nil {
-		return errors.Errorf("failed to send packet: %v", err)
+		return errors.Errorf("failed to send packet header: %v", err)
+	}
+	_, err = w.Write(bb)
+	if err != nil {
+		return errors.Errorf("failed to send packet body: %v", err)
 	}
 	return nil
 }
@@ -802,7 +803,7 @@ func (p *sshFxpDataPacket) UnmarshalBinary(b []byte) error {
 	} else if p.Length, b, err = unmarshalUint32Safe(b); err != nil {
 		return err
 	} else if uint32(len(b)) < p.Length {
-		return errShortPacket
+		return errors.New("truncated packet")
 	}
 
 	p.Data = make([]byte, p.Length)
@@ -881,9 +882,9 @@ func (p sshFxpExtendedPacket) readonly() bool {
 	return p.SpecificPacket.readonly()
 }
 
-func (p sshFxpExtendedPacket) respond(svr *Server) responsePacket {
+func (p sshFxpExtendedPacket) respond(svr *Server) error {
 	if p.SpecificPacket == nil {
-		return statusFromError(p, nil)
+		return nil
 	}
 	return p.SpecificPacket.respond(svr)
 }
@@ -953,7 +954,7 @@ func (p *sshFxpExtendedPacketPosixRename) UnmarshalBinary(b []byte) error {
 	return nil
 }
 
-func (p sshFxpExtendedPacketPosixRename) respond(s *Server) responsePacket {
+func (p sshFxpExtendedPacketPosixRename) respond(s *Server) error {
 	err := os.Rename(p.Oldpath, p.Newpath)
-	return statusFromError(p, err)
+	return s.sendError(p, err)
 }

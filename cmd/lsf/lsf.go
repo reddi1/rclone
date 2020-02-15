@@ -1,18 +1,17 @@
 package lsf
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/cmd/ls/lshelp"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/fs/operations"
+	"github.com/ncw/rclone/fs/walk"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/cmd/ls/lshelp"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
@@ -29,20 +28,20 @@ var (
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
-	cmdFlags := commandDefinition.Flags()
-	flags.StringVarP(cmdFlags, &format, "format", "F", "p", "Output format - see  help for details")
-	flags.StringVarP(cmdFlags, &separator, "separator", "s", ";", "Separator for the items in the format.")
-	flags.BoolVarP(cmdFlags, &dirSlash, "dir-slash", "d", true, "Append a slash to directory names.")
-	flags.FVarP(cmdFlags, &hashType, "hash", "", "Use this hash when `h` is used in the format MD5|SHA-1|DropboxHash")
-	flags.BoolVarP(cmdFlags, &filesOnly, "files-only", "", false, "Only list files.")
-	flags.BoolVarP(cmdFlags, &dirsOnly, "dirs-only", "", false, "Only list directories.")
-	flags.BoolVarP(cmdFlags, &csv, "csv", "", false, "Output in CSV format.")
-	flags.BoolVarP(cmdFlags, &absolute, "absolute", "", false, "Put a leading / in front of path names.")
-	flags.BoolVarP(cmdFlags, &recurse, "recursive", "R", false, "Recurse into the listing.")
+	cmd.Root.AddCommand(commandDefintion)
+	flags := commandDefintion.Flags()
+	flags.StringVarP(&format, "format", "F", "p", "Output format - see  help for details")
+	flags.StringVarP(&separator, "separator", "s", ";", "Separator for the items in the format.")
+	flags.BoolVarP(&dirSlash, "dir-slash", "d", true, "Append a slash to directory names.")
+	flags.VarP(&hashType, "hash", "", "Use this hash when `h` is used in the format MD5|SHA-1|DropboxHash")
+	flags.BoolVarP(&filesOnly, "files-only", "", false, "Only list files.")
+	flags.BoolVarP(&dirsOnly, "dirs-only", "", false, "Only list directories.")
+	flags.BoolVarP(&csv, "csv", "", false, "Output in CSV format.")
+	flags.BoolVarP(&absolute, "absolute", "", false, "Put a leading / in front of path names.")
+	commandDefintion.Flags().BoolVarP(&recurse, "recursive", "R", false, "Recurse into the listing.")
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "lsf remote:path",
 	Short: `List directories and objects in remote:path formatted for parsing`,
 	Long: `
@@ -68,11 +67,8 @@ output:
     s - size
     t - modification time
     h - hash
-    i - ID of object
-    o - Original ID of underlying object
+    i - ID of object if known
     m - MimeType of object if known
-    e - encrypted name
-    T - tier of storage if known, eg "Hot" or "Cool"
 
 So if you wanted the path, size and modification time, you would use
 --format "pst", or maybe --format "tsp" to put the path last.
@@ -152,26 +148,19 @@ those only (without traversing the whole directory structure):
 			if csv && !separatorFlagSupplied {
 				separator = ","
 			}
-			return Lsf(context.Background(), fsrc, os.Stdout)
+			return Lsf(fsrc, os.Stdout)
 		})
 	},
 }
 
 // Lsf lists all the objects in the path with modification time, size
 // and path in specific format.
-func Lsf(ctx context.Context, fsrc fs.Fs, out io.Writer) error {
+func Lsf(fsrc fs.Fs, out io.Writer) error {
 	var list operations.ListFormat
 	list.SetSeparator(separator)
 	list.SetCSV(csv)
 	list.SetDirSlash(dirSlash)
 	list.SetAbsolute(absolute)
-	var opt = operations.ListJSONOpt{
-		NoModTime:  true,
-		NoMimeType: true,
-		DirsOnly:   dirsOnly,
-		FilesOnly:  filesOnly,
-		Recurse:    recurse,
-	}
 
 	for _, char := range format {
 		switch char {
@@ -179,32 +168,38 @@ func Lsf(ctx context.Context, fsrc fs.Fs, out io.Writer) error {
 			list.AddPath()
 		case 't':
 			list.AddModTime()
-			opt.NoModTime = false
 		case 's':
 			list.AddSize()
 		case 'h':
 			list.AddHash(hashType)
-			opt.ShowHash = true
 		case 'i':
 			list.AddID()
 		case 'm':
 			list.AddMimeType()
-			opt.NoMimeType = false
-		case 'e':
-			list.AddEncrypted()
-			opt.ShowEncrypted = true
-		case 'o':
-			list.AddOrigID()
-			opt.ShowOrigIDs = true
-		case 'T':
-			list.AddTier()
 		default:
 			return errors.Errorf("Unknown format character %q", char)
 		}
 	}
 
-	return operations.ListJSON(ctx, fsrc, "", &opt, func(item *operations.ListJSONItem) error {
-		_, _ = fmt.Fprintln(out, list.Format(item))
+	return walk.Walk(fsrc, "", false, operations.ConfigMaxDepth(recurse), func(path string, entries fs.DirEntries, err error) error {
+		if err != nil {
+			fs.CountError(err)
+			fs.Errorf(path, "error listing: %v", err)
+			return nil
+		}
+		for _, entry := range entries {
+			_, isDir := entry.(fs.Directory)
+			if isDir {
+				if filesOnly {
+					continue
+				}
+			} else {
+				if dirsOnly {
+					continue
+				}
+			}
+			_, _ = fmt.Fprintln(out, list.Format(entry))
+		}
 		return nil
 	})
 }

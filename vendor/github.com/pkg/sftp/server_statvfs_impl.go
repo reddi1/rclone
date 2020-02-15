@@ -9,17 +9,17 @@ import (
 	"syscall"
 )
 
-func (p sshFxpExtendedPacketStatVFS) respond(svr *Server) responsePacket {
+func (p sshFxpExtendedPacketStatVFS) respond(svr *Server) error {
 	stat := &syscall.Statfs_t{}
 	if err := syscall.Statfs(p.Path, stat); err != nil {
-		return statusFromError(p, err)
+		return svr.sendPacket(statusFromError(p, err))
 	}
 
 	retPkt, err := statvfsFromStatfst(stat)
 	if err != nil {
-		return statusFromError(p, err)
+		return svr.sendPacket(statusFromError(p, err))
 	}
 	retPkt.ID = p.ID
 
-	return retPkt
+	return svr.sendPacket(retPkt)
 }

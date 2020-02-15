@@ -13,11 +13,8 @@ import (
 // globToRegexp converts an rsync style glob to a regexp
 //
 // documented in filtering.md
-func globToRegexp(glob string, ignoreCase bool) (*regexp.Regexp, error) {
+func globToRegexp(glob string) (*regexp.Regexp, error) {
 	var re bytes.Buffer
-	if ignoreCase {
-		_, _ = re.WriteString("(?i)")
-	}
 	if strings.HasPrefix(glob, "/") {
 		glob = glob[1:]
 		_, _ = re.WriteRune('^')

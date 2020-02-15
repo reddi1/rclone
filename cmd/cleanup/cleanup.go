@@ -1,18 +1,16 @@
 package cleanup
 
 import (
-	"context"
-
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "cleanup remote:path",
 	Short: `Clean up the remote if possible`,
 	Long: `
@@ -23,7 +21,7 @@ versions. Not supported by all remotes.
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)
 		cmd.Run(true, false, command, func() error {
-			return operations.CleanUp(context.Background(), fsrc)
+			return operations.CleanUp(fsrc)
 		})
 	},
 }

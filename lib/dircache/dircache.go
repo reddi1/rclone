@@ -4,15 +4,12 @@ package dircache
 // _methods are called without the lock
 
 import (
-	"bytes"
-	"context"
-	"fmt"
 	"log"
 	"strings"
 	"sync"
 
+	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/fs"
 )
 
 // DirCache caches paths to directory IDs and vice versa
@@ -31,8 +28,8 @@ type DirCache struct {
 
 // DirCacher describes an interface for doing the low level directory work
 type DirCacher interface {
-	FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut string, found bool, err error)
-	CreateDir(ctx context.Context, pathID, leaf string) (newID string, err error)
+	FindLeaf(pathID, leaf string) (pathIDOut string, found bool, err error)
+	CreateDir(pathID, leaf string) (newID string, err error)
 }
 
 // New makes a DirCache
@@ -47,31 +44,6 @@ func New(root string, trueRootID string, fs DirCacher) *DirCache {
 	d.Flush()
 	d.ResetRoot()
 	return d
-}
-
-// String returns the directory cache in string form for debugging
-func (dc *DirCache) String() string {
-	dc.cacheMu.RLock()
-	defer dc.cacheMu.RUnlock()
-	var buf bytes.Buffer
-	_, _ = buf.WriteString("DirCache{\n")
-	_, _ = fmt.Fprintf(&buf, "\ttrueRootID: %q,\n", dc.trueRootID)
-	_, _ = fmt.Fprintf(&buf, "\troot: %q,\n", dc.root)
-	_, _ = fmt.Fprintf(&buf, "\trootID: %q,\n", dc.rootID)
-	_, _ = fmt.Fprintf(&buf, "\trootParentID: %q,\n", dc.rootParentID)
-	_, _ = fmt.Fprintf(&buf, "\tfoundRoot: %v,\n", dc.foundRoot)
-	_, _ = buf.WriteString("\tcache: {\n")
-	for k, v := range dc.cache {
-		_, _ = fmt.Fprintf(&buf, "\t\t%q: %q,\n", k, v)
-	}
-	_, _ = buf.WriteString("\t},\n")
-	_, _ = buf.WriteString("\tinvCache: {\n")
-	for k, v := range dc.invCache {
-		_, _ = fmt.Fprintf(&buf, "\t\t%q: %q,\n", k, v)
-	}
-	_, _ = buf.WriteString("\t},\n")
-	_, _ = buf.WriteString("}\n")
-	return buf.String()
 }
 
 // Get an ID given a path
@@ -163,10 +135,10 @@ func SplitPath(path string) (directory, leaf string) {
 //  Look in the cache for the path, if found return the pathID
 //  If not found strip the last path off the path and recurse
 //  Now have a parent directory id, so look in the parent for self and return it
-func (dc *DirCache) FindDir(ctx context.Context, path string, create bool) (pathID string, err error) {
+func (dc *DirCache) FindDir(path string, create bool) (pathID string, err error) {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
-	return dc._findDir(ctx, path, create)
+	return dc._findDir(path, create)
 }
 
 // Look for the root and in the cache - safe to call without the mu
@@ -189,7 +161,7 @@ func (dc *DirCache) _findDirInCache(path string) string {
 }
 
 // Unlocked findDir - must have mu
-func (dc *DirCache) _findDir(ctx context.Context, path string, create bool) (pathID string, err error) {
+func (dc *DirCache) _findDir(path string, create bool) (pathID string, err error) {
 	pathID = dc._findDirInCache(path)
 	if pathID != "" {
 		return pathID, nil
@@ -199,14 +171,14 @@ func (dc *DirCache) _findDir(ctx context.Context, path string, create bool) (pat
 	directory, leaf := SplitPath(path)
 
 	// Recurse and find pathID for parent directory
-	parentPathID, err := dc._findDir(ctx, directory, create)
+	parentPathID, err := dc._findDir(directory, create)
 	if err != nil {
 		return "", err
 
 	}
 
 	// Find the leaf in parentPathID
-	pathID, found, err := dc.fs.FindLeaf(ctx, parentPathID, leaf)
+	pathID, found, err := dc.fs.FindLeaf(parentPathID, leaf)
 	if err != nil {
 		return "", err
 	}
@@ -214,7 +186,7 @@ func (dc *DirCache) _findDir(ctx context.Context, path string, create bool) (pat
 	// If not found create the directory if required or return an error
 	if !found {
 		if create {
-			pathID, err = dc.fs.CreateDir(ctx, parentPathID, leaf)
+			pathID, err = dc.fs.CreateDir(parentPathID, leaf)
 			if err != nil {
 				return "", errors.Wrap(err, "failed to make directory")
 			}
@@ -235,7 +207,7 @@ func (dc *DirCache) _findDir(ctx context.Context, path string, create bool) (pat
 // Do not call FindPath with the root directory - it will return an error
 //
 // If create is set parent directories will be created if they don't exist
-func (dc *DirCache) FindPath(ctx context.Context, path string, create bool) (leaf, directoryID string, err error) {
+func (dc *DirCache) FindPath(path string, create bool) (leaf, directoryID string, err error) {
 	if path == "" {
 		err = errors.New("internal error: can't call FindPath with root directory")
 		return
@@ -243,7 +215,7 @@ func (dc *DirCache) FindPath(ctx context.Context, path string, create bool) (lea
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	directory, leaf := SplitPath(path)
-	directoryID, err = dc._findDir(ctx, directory, create)
+	directoryID, err = dc._findDir(directory, create)
 	return
 }
 
@@ -252,13 +224,13 @@ func (dc *DirCache) FindPath(ctx context.Context, path string, create bool) (lea
 // Resets the root directory
 //
 // If create is set it will make the directory if not found
-func (dc *DirCache) FindRoot(ctx context.Context, create bool) error {
+func (dc *DirCache) FindRoot(create bool) error {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	if dc.foundRoot {
 		return nil
 	}
-	rootID, err := dc._findDir(ctx, dc.root, create)
+	rootID, err := dc._findDir(dc.root, create)
 	if err != nil {
 		return err
 	}
@@ -280,12 +252,12 @@ func (dc *DirCache) FindRoot(ctx context.Context, create bool) error {
 // FindRootAndPath finds the root first if not found then finds leaf and directoryID from a path
 //
 // If create is set parent directories will be created if they don't exist
-func (dc *DirCache) FindRootAndPath(ctx context.Context, path string, create bool) (leaf, directoryID string, err error) {
-	err = dc.FindRoot(ctx, create)
+func (dc *DirCache) FindRootAndPath(path string, create bool) (leaf, directoryID string, err error) {
+	err = dc.FindRoot(create)
 	if err != nil {
 		return
 	}
-	return dc.FindPath(ctx, path, create)
+	return dc.FindPath(path, create)
 }
 
 // FoundRoot returns whether the root directory has been found yet

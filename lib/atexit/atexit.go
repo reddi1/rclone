@@ -9,35 +9,27 @@ import (
 	"os/signal"
 	"sync"
 
-	"github.com/rclone/rclone/fs"
+	"github.com/ncw/rclone/fs"
 )
 
 var (
-	fns          = make(map[FnHandle]bool)
-	fnsMutex     sync.Mutex
+	fns          []func()
 	exitChan     chan os.Signal
 	exitOnce     sync.Once
 	registerOnce sync.Once
 )
 
-// FnHandle is the type of the handle returned by function `Register`
-// that can be used to unregister an at-exit function
-type FnHandle *func()
-
-// Register a function to be called on exit.
-// Returns a handle which can be used to unregister the function with `Unregister`.
-func Register(fn func()) FnHandle {
-	fnsMutex.Lock()
-	fns[&fn] = true
-	fnsMutex.Unlock()
-
-	// Run AtExit handlers on exitSignals so everything gets tidied up properly
+// Register a function to be called on exit
+func Register(fn func()) {
+	fns = append(fns, fn)
+	// Run AtExit handlers on SIGINT or SIGTERM so everything gets
+	// tidied up properly
 	registerOnce.Do(func() {
 		exitChan = make(chan os.Signal, 1)
-		signal.Notify(exitChan, exitSignals...)
+		signal.Notify(exitChan, os.Interrupt) // syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT
 		go func() {
-			sig := <-exitChan
-			if sig == nil {
+			sig, closed := <-exitChan
+			if closed || sig == nil {
 				return
 			}
 			fs.Infof(nil, "Signal received: %s", sig)
@@ -46,15 +38,6 @@ func Register(fn func()) FnHandle {
 			os.Exit(0)
 		}()
 	})
-
-	return &fn
-}
-
-// Unregister a function using the handle returned by `Register`
-func Unregister(handle FnHandle) {
-	fnsMutex.Lock()
-	defer fnsMutex.Unlock()
-	delete(fns, handle)
 }
 
 // IgnoreSignals disables the signal handler and prevents Run from beeing executed automatically
@@ -70,10 +53,8 @@ func IgnoreSignals() {
 // Run all the at exit functions if they haven't been run already
 func Run() {
 	exitOnce.Do(func() {
-		fnsMutex.Lock()
-		defer fnsMutex.Unlock()
-		for fnHandle := range fns {
-			(*fnHandle)()
+		for _, fn := range fns {
+			fn()
 		}
 	})
 }

@@ -1,20 +1,18 @@
 package dbhashsum
 
 import (
-	"context"
 	"os"
 
-	"github.com/rclone/rclone/backend/dropbox"
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "dbhashsum remote:path",
 	Short: `Produces a Dropbox hash file for all the objects in the path.`,
 	Long: `
@@ -27,7 +25,7 @@ The output is in the same format as md5sum and sha1sum.
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {
-			return operations.HashLister(context.Background(), dropbox.DbHashType, fsrc, os.Stdout)
+			return operations.DropboxHashSum(fsrc, os.Stdout)
 		})
 	},
 }

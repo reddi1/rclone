@@ -1,12 +1,10 @@
 package dedupe
 
 import (
-	"context"
 	"log"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
@@ -15,12 +13,11 @@ var (
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
-	cmdFlag := commandDefinition.Flags()
-	flags.FVarP(cmdFlag, &dedupeMode, "dedupe-mode", "", "Dedupe mode interactive|skip|first|newest|oldest|largest|smallest|rename.")
+	cmd.Root.AddCommand(commandDefintion)
+	commandDefintion.Flags().VarP(&dedupeMode, "dedupe-mode", "", "Dedupe mode interactive|skip|first|newest|oldest|rename.")
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "dedupe [mode] remote:path",
 	Short: `Interactively find duplicate files and delete/rename them.`,
 	Long: `
@@ -94,7 +91,6 @@ Dedupe can be run non interactively using the ` + "`" + `--dedupe-mode` + "`" + 
   * ` + "`" + `--dedupe-mode newest` + "`" + ` - removes identical files then keeps the newest one.
   * ` + "`" + `--dedupe-mode oldest` + "`" + ` - removes identical files then keeps the oldest one.
   * ` + "`" + `--dedupe-mode largest` + "`" + ` - removes identical files then keeps the largest one.
-  * ` + "`" + `--dedupe-mode smallest` + "`" + ` - removes identical files then keeps the smallest one.
   * ` + "`" + `--dedupe-mode rename` + "`" + ` - removes identical files then renames the rest to be different.
 
 For example to rename all the identically named photos in your Google Photos directory, do
@@ -116,7 +112,7 @@ Or
 		}
 		fdst := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {
-			return operations.Deduplicate(context.Background(), fdst, dedupeMode)
+			return operations.Deduplicate(fdst, dedupeMode)
 		})
 	},
 }

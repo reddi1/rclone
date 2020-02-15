@@ -1,9 +1,6 @@
 package fs
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 // Dir describes an unspecialized directory for directory/container/bucket lists
 type Dir struct {
@@ -25,13 +22,12 @@ func NewDir(remote string, modTime time.Time) *Dir {
 }
 
 // NewDirCopy creates an unspecialized copy of the Directory object passed in
-func NewDirCopy(ctx context.Context, d Directory) *Dir {
+func NewDirCopy(d Directory) *Dir {
 	return &Dir{
 		remote:  d.Remote(),
-		modTime: d.ModTime(ctx),
+		modTime: d.ModTime(),
 		size:    d.Size(),
 		items:   d.Items(),
-		id:      d.ID(),
 	}
 }
 
@@ -64,7 +60,7 @@ func (d *Dir) SetID(id string) *Dir {
 
 // ModTime returns the modification date of the file
 // It should return a best guess if one isn't available
-func (d *Dir) ModTime(ctx context.Context) time.Time {
+func (d *Dir) ModTime() time.Time {
 	if !d.modTime.IsZero() {
 		return d.modTime
 	}

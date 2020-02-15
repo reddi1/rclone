@@ -1,26 +1,18 @@
 package hashsum
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
-)
-
-var (
-	outputBase64 = false
 )
 
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
-	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &outputBase64, "base64", "", outputBase64, "Output base64 encoded hashsum")
 }
 
 var commandDefinition = &cobra.Command{
@@ -48,7 +40,7 @@ Then
 		cmd.CheckArgs(0, 2, command, args)
 		if len(args) == 0 {
 			fmt.Printf("Supported hashes are:\n")
-			for _, ht := range hash.Supported().Array() {
+			for _, ht := range hash.Supported.Array() {
 				fmt.Printf("  * %v\n", ht)
 			}
 			return nil
@@ -62,10 +54,7 @@ Then
 		}
 		fsrc := cmd.NewFsSrc(args[1:])
 		cmd.Run(false, false, command, func() error {
-			if outputBase64 {
-				return operations.HashListerBase64(context.Background(), ht, fsrc, os.Stdout)
-			}
-			return operations.HashLister(context.Background(), ht, fsrc, os.Stdout)
+			return operations.HashLister(ht, fsrc, os.Stdout)
 		})
 		return nil
 	},

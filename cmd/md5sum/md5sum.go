@@ -1,19 +1,18 @@
 package md5sum
 
 import (
-	"context"
 	"os"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "md5sum remote:path",
 	Short: `Produces an md5sum file for all the objects in the path.`,
 	Long: `
@@ -24,7 +23,7 @@ is in the same format as the standard md5sum tool produces.
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {
-			return operations.Md5sum(context.Background(), fsrc, os.Stdout)
+			return operations.Md5sum(fsrc, os.Stdout)
 		})
 	},
 }

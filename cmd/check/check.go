@@ -1,11 +1,8 @@
 package check
 
 import (
-	"context"
-
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
@@ -16,13 +13,12 @@ var (
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
-	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &download, "download", "", download, "Check by downloading rather than with hash.")
-	flags.BoolVarP(cmdFlags, &oneway, "one-way", "", oneway, "Check one way only, source files must exist on remote")
+	cmd.Root.AddCommand(commandDefintion)
+	commandDefintion.Flags().BoolVarP(&download, "download", "", download, "Check by downloading rather than with hash.")
+	commandDefintion.Flags().BoolVarP(&oneway, "one-way", "", oneway, "Check one way only, source files must exist on remote")
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "check source:path dest:path",
 	Short: `Checks the files in the source and destination match.`,
 	Long: `
@@ -47,9 +43,9 @@ destination that are not in the source will not trigger an error.
 		fsrc, fdst := cmd.NewFsSrcDst(args)
 		cmd.Run(false, false, command, func() error {
 			if download {
-				return operations.CheckDownload(context.Background(), fdst, fsrc, oneway)
+				return operations.CheckDownload(fdst, fsrc, oneway)
 			}
-			return operations.Check(context.Background(), fdst, fsrc, oneway)
+			return operations.Check(fdst, fsrc, oneway)
 		})
 	},
 }

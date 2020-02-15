@@ -7,7 +7,7 @@ package mountlib
 import (
 	"log"
 
-	daemon "github.com/sevlyar/go-daemon"
+	"github.com/sevlyar/go-daemon"
 )
 
 func startBackgroundMode() bool {

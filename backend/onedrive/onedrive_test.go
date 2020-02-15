@@ -1,26 +1,17 @@
 // Test OneDrive filesystem interface
-package onedrive
+package onedrive_test
 
 import (
 	"testing"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fstest/fstests"
+	"github.com/ncw/rclone/backend/onedrive"
+	"github.com/ncw/rclone/fstest/fstests"
 )
 
 // TestIntegration runs integration tests against the remote
 func TestIntegration(t *testing.T) {
 	fstests.Run(t, &fstests.Opt{
 		RemoteName: "TestOneDrive:",
-		NilObject:  (*Object)(nil),
-		ChunkedUpload: fstests.ChunkedUploadConfig{
-			CeilChunkSize: fstests.NextMultipleOf(chunkSizeMultiple),
-		},
+		NilObject:  (*onedrive.Object)(nil),
 	})
 }
-
-func (f *Fs) SetUploadChunkSize(cs fs.SizeSuffix) (fs.SizeSuffix, error) {
-	return f.setUploadChunkSize(cs)
-}
-
-var _ fstests.SetUploadChunkSizer = (*Fs)(nil)

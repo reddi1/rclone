@@ -87,7 +87,6 @@ const (
 	AuthErrorInvalidSelectUser  = "invalid_select_user"
 	AuthErrorInvalidSelectAdmin = "invalid_select_admin"
 	AuthErrorUserSuspended      = "user_suspended"
-	AuthErrorExpiredAccessToken = "expired_access_token"
 	AuthErrorOther              = "other"
 )
 

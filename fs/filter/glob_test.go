@@ -41,21 +41,15 @@ func TestGlobToRegexp(t *testing.T) {
 		{`a\*b`, `(^|/)a\*b$`, ``},
 		{`a\\b`, `(^|/)a\\b$`, ``},
 	} {
-		for _, ignoreCase := range []bool{false, true} {
-			gotRe, err := globToRegexp(test.in, ignoreCase)
-			if test.error == "" {
-				prefix := ""
-				if ignoreCase {
-					prefix = "(?i)"
-				}
-				got := gotRe.String()
-				require.NoError(t, err, test.in)
-				assert.Equal(t, prefix+test.want, got, test.in)
-			} else {
-				require.Error(t, err, test.in)
-				assert.Contains(t, err.Error(), test.error, test.in)
-				assert.Nil(t, gotRe)
-			}
+		gotRe, err := globToRegexp(test.in)
+		if test.error == "" {
+			got := gotRe.String()
+			require.NoError(t, err, test.in)
+			assert.Equal(t, test.want, got, test.in)
+		} else {
+			require.Error(t, err, test.in)
+			assert.Contains(t, err.Error(), test.error, test.in)
+			assert.Nil(t, gotRe)
 		}
 	}
 }
@@ -102,7 +96,7 @@ func TestGlobToDirGlobs(t *testing.T) {
 		{"/sausage3**", []string{`/sausage3**/`, "/"}},
 		{"/a/*.jpg", []string{`/a/`, "/"}},
 	} {
-		_, err := globToRegexp(test.in, false)
+		_, err := globToRegexp(test.in)
 		assert.NoError(t, err)
 		got := globToDirGlobs(test.in)
 		assert.Equal(t, test.want, got, test.in)

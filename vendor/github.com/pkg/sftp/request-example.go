@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -30,7 +29,6 @@ func (fs *root) Fileread(r *Request) (io.ReaderAt, error) {
 	if fs.mockErr != nil {
 		return nil, fs.mockErr
 	}
-	_ = r.WithContext(r.Context()) // initialize context for deadlock testing
 	fs.filesLock.Lock()
 	defer fs.filesLock.Unlock()
 	file, err := fs.fetch(r.Filepath)
@@ -50,7 +48,6 @@ func (fs *root) Filewrite(r *Request) (io.WriterAt, error) {
 	if fs.mockErr != nil {
 		return nil, fs.mockErr
 	}
-	_ = r.WithContext(r.Context()) // initialize context for deadlock testing
 	fs.filesLock.Lock()
 	defer fs.filesLock.Unlock()
 	file, err := fs.fetch(r.Filepath)
@@ -72,7 +69,6 @@ func (fs *root) Filecmd(r *Request) error {
 	if fs.mockErr != nil {
 		return fs.mockErr
 	}
-	_ = r.WithContext(r.Context()) // initialize context for deadlock testing
 	fs.filesLock.Lock()
 	defer fs.filesLock.Unlock()
 	switch r.Method {
@@ -87,7 +83,6 @@ func (fs *root) Filecmd(r *Request) error {
 			return &os.LinkError{Op: "rename", Old: r.Filepath, New: r.Target,
 				Err: fmt.Errorf("dest file exists")}
 		}
-		file.name = r.Target
 		fs.files[r.Target] = file
 		delete(fs.files, r.Filepath)
 	case "Rmdir", "Remove":
@@ -133,20 +128,11 @@ func (fs *root) Filelist(r *Request) (ListerAt, error) {
 	if fs.mockErr != nil {
 		return nil, fs.mockErr
 	}
-	_ = r.WithContext(r.Context()) // initialize context for deadlock testing
 	fs.filesLock.Lock()
 	defer fs.filesLock.Unlock()
 
-	file, err := fs.fetch(r.Filepath)
-	if err != nil {
-		return nil, err
-	}
-
 	switch r.Method {
 	case "List":
-		if !file.IsDir() {
-			return nil, syscall.ENOTDIR
-		}
 		ordered_names := []string{}
 		for fn, _ := range fs.files {
 			if filepath.Dir(fn) == r.Filepath {
@@ -160,8 +146,16 @@ func (fs *root) Filelist(r *Request) (ListerAt, error) {
 		}
 		return listerat(list), nil
 	case "Stat":
+		file, err := fs.fetch(r.Filepath)
+		if err != nil {
+			return nil, err
+		}
 		return listerat([]os.FileInfo{file}), nil
 	case "Readlink":
+		file, err := fs.fetch(r.Filepath)
+		if err != nil {
+			return nil, err
+		}
 		if file.symlink != "" {
 			file, err = fs.fetch(file.symlink)
 			if err != nil {

@@ -2,19 +2,20 @@ package alias
 
 import (
 	"errors"
+	"path"
+	"path/filepath"
 	"strings"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config/configmap"
-	"github.com/rclone/rclone/fs/config/configstruct"
-	"github.com/rclone/rclone/fs/fspath"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/config/configmap"
+	"github.com/ncw/rclone/fs/config/configstruct"
 )
 
 // Register with Fs
 func init() {
 	fsi := &fs.RegInfo{
 		Name:        "alias",
-		Description: "Alias for an existing remote",
+		Description: "Alias for a existing remote",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name:     "remote",
@@ -30,7 +31,7 @@ type Options struct {
 	Remote string `config:"remote"`
 }
 
-// NewFs constructs an Fs from the path.
+// NewFs contstructs an Fs from the path.
 //
 // The returned Fs is the actual Fs, referenced by remote in the config
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
@@ -46,9 +47,13 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if strings.HasPrefix(opt.Remote, name+":") {
 		return nil, errors.New("can't point alias remote at itself - check the value of the remote setting")
 	}
-	fsInfo, configName, fsPath, config, err := fs.ConfigFs(opt.Remote)
+	_, configName, fsPath, err := fs.ParseRemote(opt.Remote)
 	if err != nil {
 		return nil, err
 	}
-	return fsInfo.NewFs(configName, fspath.JoinRootPath(fsPath, root), config)
+	root = path.Join(fsPath, filepath.ToSlash(root))
+	if configName == "local" {
+		return fs.NewFs(root)
+	}
+	return fs.NewFs(configName + ":" + root)
 }

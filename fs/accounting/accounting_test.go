@@ -2,16 +2,15 @@ package accounting
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/asyncreader"
-	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/asyncreader"
+	"github.com/ncw/rclone/fs/fserrors"
+	"github.com/ncw/rclone/fstest/mockobject"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,29 +25,36 @@ var (
 
 func TestNewAccountSizeName(t *testing.T) {
 	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
-	stats := NewStats()
-	acc := newAccountSizeName(stats, in, 1, "test")
+	acc := NewAccountSizeName(in, 1, "test")
 	assert.Equal(t, in, acc.in)
-	assert.Equal(t, acc, stats.inProgress.get("test"))
+	assert.Equal(t, acc, Stats.inProgress.get("test"))
 	err := acc.Close()
 	assert.NoError(t, err)
-	assert.Equal(t, acc, stats.inProgress.get("test"))
-	acc.Done()
-	assert.Nil(t, stats.inProgress.get("test"))
+	assert.Nil(t, Stats.inProgress.get("test"))
+}
+
+func TestNewAccount(t *testing.T) {
+	obj := mockobject.Object("test")
+	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
+	acc := NewAccount(in, obj)
+	assert.Equal(t, in, acc.in)
+	assert.Equal(t, acc, Stats.inProgress.get("test"))
+	err := acc.Close()
+	assert.NoError(t, err)
+	assert.Nil(t, Stats.inProgress.get("test"))
 }
 
 func TestAccountWithBuffer(t *testing.T) {
 	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
 
-	stats := NewStats()
-	acc := newAccountSizeName(stats, in, -1, "test")
+	acc := NewAccountSizeName(in, -1, "test")
 	acc.WithBuffer()
 	// should have a buffer for an unknown size
 	_, ok := acc.in.(*asyncreader.AsyncReader)
 	require.True(t, ok)
 	assert.NoError(t, acc.Close())
 
-	acc = newAccountSizeName(stats, in, 1, "test")
+	acc = NewAccountSizeName(in, 1, "test")
 	acc.WithBuffer()
 	// should not have a buffer for a small size
 	_, ok = acc.in.(*asyncreader.AsyncReader)
@@ -57,42 +63,27 @@ func TestAccountWithBuffer(t *testing.T) {
 }
 
 func TestAccountGetUpdateReader(t *testing.T) {
-	test := func(doClose bool) func(t *testing.T) {
-		return func(t *testing.T) {
-			in := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
-			stats := NewStats()
-			acc := newAccountSizeName(stats, in, 1, "test")
+	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
+	acc := NewAccountSizeName(in, 1, "test")
 
-			assert.Equal(t, in, acc.GetReader())
-			assert.Equal(t, acc, stats.inProgress.get("test"))
+	assert.Equal(t, in, acc.GetReader())
 
-			if doClose {
-				// close the account before swapping it out
-				require.NoError(t, acc.Close())
-			}
+	in2 := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
+	acc.UpdateReader(in2)
 
-			in2 := ioutil.NopCloser(bytes.NewBuffer([]byte{1}))
-			acc.UpdateReader(in2)
+	assert.Equal(t, in2, acc.GetReader())
 
-			assert.Equal(t, in2, acc.GetReader())
-			assert.Equal(t, acc, stats.inProgress.get("test"))
-
-			assert.NoError(t, acc.Close())
-		}
-	}
-	t.Run("NoClose", test(false))
-	t.Run("Close", test(true))
+	assert.NoError(t, acc.Close())
 }
 
 func TestAccountRead(t *testing.T) {
 	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1, 2, 3}))
-	stats := NewStats()
-	acc := newAccountSizeName(stats, in, 1, "test")
+	acc := NewAccountSizeName(in, 1, "test")
 
 	assert.True(t, acc.start.IsZero())
 	assert.Equal(t, 0, acc.lpBytes)
 	assert.Equal(t, int64(0), acc.bytes)
-	assert.Equal(t, int64(0), stats.bytes)
+	assert.Equal(t, int64(0), Stats.bytes)
 
 	var buf = make([]byte, 2)
 	n, err := acc.Read(buf)
@@ -103,7 +94,7 @@ func TestAccountRead(t *testing.T) {
 	assert.False(t, acc.start.IsZero())
 	assert.Equal(t, 2, acc.lpBytes)
 	assert.Equal(t, int64(2), acc.bytes)
-	assert.Equal(t, int64(2), stats.bytes)
+	assert.Equal(t, int64(2), Stats.bytes)
 
 	n, err = acc.Read(buf)
 	assert.NoError(t, err)
@@ -119,8 +110,7 @@ func TestAccountRead(t *testing.T) {
 
 func TestAccountString(t *testing.T) {
 	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1, 2, 3}))
-	stats := NewStats()
-	acc := newAccountSizeName(stats, in, 3, "test")
+	acc := NewAccountSizeName(in, 3, "test")
 
 	// FIXME not an exhaustive test!
 
@@ -139,8 +129,7 @@ func TestAccountString(t *testing.T) {
 // Test the Accounter interface methods on Account and accountStream
 func TestAccountAccounter(t *testing.T) {
 	in := ioutil.NopCloser(bytes.NewBuffer([]byte{1, 2, 3}))
-	stats := NewStats()
-	acc := newAccountSizeName(stats, in, 3, "test")
+	acc := NewAccountSizeName(in, 3, "test")
 
 	assert.True(t, in == acc.OldStream())
 
@@ -201,10 +190,10 @@ func TestAccountMaxTransfer(t *testing.T) {
 	defer func() {
 		fs.Config.MaxTransfer = old
 	}()
+	Stats.ResetCounters()
 
 	in := ioutil.NopCloser(bytes.NewBuffer(make([]byte, 100)))
-	stats := NewStats()
-	acc := newAccountSizeName(stats, in, 1, "test")
+	acc := NewAccountSizeName(in, 1, "test")
 
 	var b = make([]byte, 10)
 
@@ -218,47 +207,4 @@ func TestAccountMaxTransfer(t *testing.T) {
 	assert.Equal(t, 0, n)
 	assert.Equal(t, ErrorMaxTransferLimitReached, err)
 	assert.True(t, fserrors.IsFatalError(err))
-}
-
-func TestShortenName(t *testing.T) {
-	for _, test := range []struct {
-		in   string
-		size int
-		want string
-	}{
-		{"", 0, ""},
-		{"abcde", 10, "abcde"},
-		{"abcde", 0, "abcde"},
-		{"abcde", -1, "abcde"},
-		{"abcde", 5, "abcde"},
-		{"abcde", 4, "ab…e"},
-		{"abcde", 3, "a…e"},
-		{"abcde", 2, "a…"},
-		{"abcde", 1, "…"},
-		{"abcdef", 6, "abcdef"},
-		{"abcdef", 5, "ab…ef"},
-		{"abcdef", 4, "ab…f"},
-		{"abcdef", 3, "a…f"},
-		{"abcdef", 2, "a…"},
-		{"áßcdèf", 1, "…"},
-		{"áßcdè", 5, "áßcdè"},
-		{"áßcdè", 4, "áß…è"},
-		{"áßcdè", 3, "á…è"},
-		{"áßcdè", 2, "á…"},
-		{"áßcdè", 1, "…"},
-		{"áßcdèł", 6, "áßcdèł"},
-		{"áßcdèł", 5, "áß…èł"},
-		{"áßcdèł", 4, "áß…ł"},
-		{"áßcdèł", 3, "á…ł"},
-		{"áßcdèł", 2, "á…"},
-		{"áßcdèł", 1, "…"},
-	} {
-		t.Run(fmt.Sprintf("in=%q, size=%d", test.in, test.size), func(t *testing.T) {
-			got := shortenName(test.in, test.size)
-			assert.Equal(t, test.want, got)
-			if test.size > 0 {
-				assert.True(t, utf8.RuneCountInString(got) <= test.size, "too big")
-			}
-		})
-	}
 }

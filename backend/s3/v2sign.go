@@ -44,7 +44,16 @@ func sign(AccessKey, SecretKey string, req *http.Request) {
 	req.Header.Set("Date", date)
 
 	// Sort out URI
-	uri := req.URL.EscapedPath()
+	uri := req.URL.Opaque
+	if uri != "" {
+		if strings.HasPrefix(uri, "//") {
+			// Strip off //host/uri
+			uri = "/" + strings.Join(strings.Split(uri, "/")[3:], "/")
+			req.URL.Opaque = uri // reset to plain URI otherwise Ceph gets confused
+		}
+	} else {
+		uri = req.URL.Path
+	}
 	if uri == "" {
 		uri = "/"
 	}

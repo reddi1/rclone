@@ -17,13 +17,12 @@ import (
 	"time"
 
 	"github.com/billziss-gh/cgofuse/fuse"
+	"github.com/ncw/rclone/cmd/mountlib"
+	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/vfs"
+	"github.com/ncw/rclone/vfs/vfsflags"
 	"github.com/okzk/sdnotify"
 	"github.com/pkg/errors"
-	"github.com/rclone/rclone/cmd/mountlib"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/lib/atexit"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
 )
 
 func init() {
@@ -31,7 +30,7 @@ func init() {
 	if runtime.GOOS == "windows" {
 		name = "mount"
 	}
-	mountlib.NewMountCommand(name, false, Mount)
+	mountlib.NewMountCommand(name, Mount)
 }
 
 // mountOptions configures the options from the command line flags
@@ -54,6 +53,7 @@ func mountOptions(device string, mountpoint string) (options []string) {
 
 	// OSX options
 	if runtime.GOOS == "darwin" {
+		options = append(options, "-o", "volname="+mountlib.VolumeName)
 		if mountlib.NoAppleDouble {
 			options = append(options, "-o", "noappledouble")
 		}
@@ -70,11 +70,6 @@ func mountOptions(device string, mountpoint string) (options []string) {
 		options = append(options, "--FileSystemName=rclone")
 	}
 
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		if mountlib.VolumeName != "" {
-			options = append(options, "-o", "volname="+mountlib.VolumeName)
-		}
-	}
 	if mountlib.AllowNonEmpty {
 		options = append(options, "-o", "nonempty")
 	}
@@ -128,7 +123,7 @@ func waitFor(fn func() bool) (ok bool) {
 func mount(f fs.Fs, mountpoint string) (*vfs.VFS, <-chan error, func() error, error) {
 	fs.Debugf(f, "Mounting on %q", mountpoint)
 
-	// Check the mountpoint - in Windows the mountpoint mustn't exist before the mount
+	// Check the mountpoint - in Windows the mountpoint musn't exist before the mount
 	if runtime.GOOS != "windows" {
 		fi, err := os.Stat(mountpoint)
 		if err != nil {
@@ -208,7 +203,7 @@ func mount(f fs.Fs, mountpoint string) (*vfs.VFS, <-chan error, func() error, er
 // If noModTime is set then it
 func Mount(f fs.Fs, mountpoint string) error {
 	// Mount it
-	FS, errChan, unmount, err := mount(f, mountpoint)
+	FS, errChan, _, err := mount(f, mountpoint)
 	if err != nil {
 		return errors.Wrap(err, "failed to mount FUSE fs")
 	}
@@ -218,11 +213,7 @@ func Mount(f fs.Fs, mountpoint string) error {
 	sigHup := make(chan os.Signal, 1)
 	signal.Notify(sigHup, syscall.SIGHUP)
 
-	atexit.Register(func() {
-		_ = unmount()
-	})
-
-	if err := sdnotify.Ready(); err != nil && err != sdnotify.ErrSdNotifyNoSocket {
+	if err := sdnotify.SdNotifyReady(); err != nil && err != sdnotify.SdNotifyNoSocket {
 		return errors.Wrap(err, "failed to notify systemd")
 	}
 
@@ -243,7 +234,7 @@ waitloop:
 		}
 	}
 
-	_ = sdnotify.Stopping()
+	_ = sdnotify.SdNotifyStopping()
 	if err != nil {
 		return errors.Wrap(err, "failed to umount FUSE fs")
 	}

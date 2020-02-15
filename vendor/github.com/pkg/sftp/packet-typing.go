@@ -12,6 +12,8 @@ type requestPacket interface {
 	id() uint32
 }
 
+type requestChan chan requestPacket
+
 type responsePacket interface {
 	encoding.BinaryMarshaler
 	id() uint32
@@ -75,7 +77,6 @@ func (p sshFxpStatusPacket) id() uint32 { return p.ID }
 func (p sshFxpStatResponse) id() uint32 { return p.ID }
 func (p sshFxpNamePacket) id() uint32   { return p.ID }
 func (p sshFxpHandlePacket) id() uint32 { return p.ID }
-func (p StatVFS) id() uint32            { return p.ID }
 func (p sshFxVersionPacket) id() uint32 { return 0 }
 
 // take raw incoming packet data and build packet objects

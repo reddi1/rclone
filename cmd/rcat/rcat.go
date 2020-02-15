@@ -1,21 +1,20 @@
 package rcat
 
 import (
-	"context"
 	"log"
 	"os"
 	"time"
 
-	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/fs/operations"
+	"github.com/ncw/rclone/cmd"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	cmd.Root.AddCommand(commandDefinition)
+	cmd.Root.AddCommand(commandDefintion)
 }
 
-var commandDefinition = &cobra.Command{
+var commandDefintion = &cobra.Command{
 	Use:   "rcat remote:path",
 	Short: `Copies standard input to file on remote.`,
 	Long: `
@@ -51,7 +50,7 @@ a lot of data, you're better off caching locally and then
 
 		fdst, dstFileName := cmd.NewFsDstFile(args)
 		cmd.Run(false, false, command, func() error {
-			_, err := operations.Rcat(context.Background(), fdst, dstFileName, os.Stdin, time.Now())
+			_, err := operations.Rcat(fdst, dstFileName, os.Stdin, time.Now())
 			return err
 		})
 	},

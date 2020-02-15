@@ -3,15 +3,12 @@
 package vfs
 
 import (
-	"context"
 	"io"
 	"os"
 	"testing"
 
-	"github.com/pkg/errors"
-	_ "github.com/rclone/rclone/backend/all" // import all the backends
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fstest"
+	_ "github.com/ncw/rclone/backend/all" // import all the backends
+	"github.com/ncw/rclone/fstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -100,9 +97,7 @@ func TestVFSNew(t *testing.T) {
 
 	// Check making a VFS with nil options
 	vfs := New(r.Fremote, nil)
-	var defaultOpt = DefaultOpt
-	defaultOpt.DirPerms |= os.ModeDir
-	assert.Equal(t, vfs.Opt, defaultOpt)
+	assert.Equal(t, vfs.Opt, DefaultOpt)
 	assert.Equal(t, vfs.f, r.Fremote)
 
 	// Check the initialisation
@@ -133,8 +128,8 @@ func TestVFSStat(t *testing.T) {
 	defer r.Finalise()
 	vfs := New(r.Fremote, nil)
 
-	file1 := r.WriteObject(context.Background(), "file1", "file1 contents", t1)
-	file2 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
+	file1 := r.WriteObject("file1", "file1 contents", t1)
+	file2 := r.WriteObject("dir/file2", "file2 contents", t2)
 	fstest.CheckItems(t, r.Fremote, file1, file2)
 
 	node, err := vfs.Stat("file1")
@@ -152,16 +147,16 @@ func TestVFSStat(t *testing.T) {
 	assert.True(t, node.IsFile())
 	assert.Equal(t, "file2", node.Name())
 
-	_, err = vfs.Stat("not found")
+	node, err = vfs.Stat("not found")
 	assert.Equal(t, os.ErrNotExist, err)
 
-	_, err = vfs.Stat("dir/not found")
+	node, err = vfs.Stat("dir/not found")
 	assert.Equal(t, os.ErrNotExist, err)
 
-	_, err = vfs.Stat("not found/not found")
+	node, err = vfs.Stat("not found/not found")
 	assert.Equal(t, os.ErrNotExist, err)
 
-	_, err = vfs.Stat("file1/under a file")
+	node, err = vfs.Stat("file1/under a file")
 	assert.Equal(t, os.ErrNotExist, err)
 }
 
@@ -170,8 +165,8 @@ func TestVFSStatParent(t *testing.T) {
 	defer r.Finalise()
 	vfs := New(r.Fremote, nil)
 
-	file1 := r.WriteObject(context.Background(), "file1", "file1 contents", t1)
-	file2 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
+	file1 := r.WriteObject("file1", "file1 contents", t1)
+	file2 := r.WriteObject("dir/file2", "file2 contents", t2)
 	fstest.CheckItems(t, r.Fremote, file1, file2)
 
 	node, leaf, err := vfs.StatParent("file1")
@@ -204,8 +199,8 @@ func TestVFSOpenFile(t *testing.T) {
 	defer r.Finalise()
 	vfs := New(r.Fremote, nil)
 
-	file1 := r.WriteObject(context.Background(), "file1", "file1 contents", t1)
-	file2 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
+	file1 := r.WriteObject("file1", "file1 contents", t1)
+	file2 := r.WriteObject("dir/file2", "file2 contents", t2)
 	fstest.CheckItems(t, r.Fremote, file1, file2)
 
 	fd, err := vfs.OpenFile("file1", os.O_RDONLY, 0777)
@@ -225,10 +220,7 @@ func TestVFSOpenFile(t *testing.T) {
 	fd, err = vfs.OpenFile("dir/new_file.txt", os.O_WRONLY|os.O_CREATE, 0777)
 	require.NoError(t, err)
 	assert.NotNil(t, fd)
-	err = fd.Close()
-	if errors.Cause(err) != fs.ErrorCantUploadEmptyFiles {
-		require.NoError(t, err)
-	}
+	require.NoError(t, fd.Close())
 
 	fd, err = vfs.OpenFile("not found/new_file.txt", os.O_WRONLY|os.O_CREATE, 0777)
 	assert.Equal(t, os.ErrNotExist, err)
@@ -238,13 +230,9 @@ func TestVFSOpenFile(t *testing.T) {
 func TestVFSRename(t *testing.T) {
 	r := fstest.NewRun(t)
 	defer r.Finalise()
-	features := r.Fremote.Features()
-	if features.Move == nil && features.Copy == nil {
-		return // skip as can't rename files
-	}
 	vfs := New(r.Fremote, nil)
 
-	file1 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
+	file1 := r.WriteObject("dir/file2", "file2 contents", t2)
 	fstest.CheckItems(t, r.Fremote, file1)
 
 	err := vfs.Rename("dir/file2", "dir/file1")
@@ -273,32 +261,24 @@ func TestVFSStatfs(t *testing.T) {
 	assert.Nil(t, vfs.usage)
 	assert.True(t, vfs.usageTime.IsZero())
 
-	aboutSupported := r.Fremote.Features().About != nil
-
 	// read
 	total, used, free := vfs.Statfs()
-	if !aboutSupported {
-		assert.Equal(t, int64(-1), total)
-		assert.Equal(t, int64(-1), free)
-		assert.Equal(t, int64(-1), used)
-		return // can't test anything else if About not supported
-	}
 	require.NotNil(t, vfs.usage)
 	assert.False(t, vfs.usageTime.IsZero())
 	if vfs.usage.Total != nil {
 		assert.Equal(t, *vfs.usage.Total, total)
 	} else {
-		assert.Equal(t, int64(-1), total)
+		assert.Equal(t, -1, total)
 	}
 	if vfs.usage.Free != nil {
 		assert.Equal(t, *vfs.usage.Free, free)
 	} else {
-		assert.Equal(t, int64(-1), free)
+		assert.Equal(t, -1, free)
 	}
 	if vfs.usage.Used != nil {
 		assert.Equal(t, *vfs.usage.Used, used)
 	} else {
-		assert.Equal(t, int64(-1), used)
+		assert.Equal(t, -1, used)
 	}
 
 	// read cached
